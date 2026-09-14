@@ -39,7 +39,7 @@ if [[ -z "${odin_bin}" || ! -x "${odin_bin}" ]]; then
   exit 1
 fi
 
-packages=(mica/var mica/kernel mica/vm mica/compiler mica/runtime mica/dom mica/store host/web)
+packages=(mica/var mica/kernel mica/kernel/accel mica/vm mica/compiler mica/runtime mica/dom mica/store host/web)
 bin_dir="${repo_root}/.cache/test-bin"
 log_dir="${repo_root}/.cache/test-logs"
 strict_leaks="${STRICT_LEAKS:-0}"
