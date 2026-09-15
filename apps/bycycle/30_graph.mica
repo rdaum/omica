@@ -1,0 +1,29 @@
+// Bycycle graph: symmetric broader-term navigation and rewrite chains.
+// RewriteOf is transitive; BroaderTerm reads both directions.
+// NOTE: head relations declared here (per-file rule lowering).
+
+make_relation(:Broader, 2)
+make_relation(:RewrittenTo, 2)
+
+Broader(a, b) :-
+  BroaderTerm(a, b)
+
+Broader(a, b) :-
+  BroaderTerm(b, a)
+
+RewrittenTo(a, c) :-
+  RewriteOf(a, c)
+
+RewrittenTo(a, c) :-
+  RewriteOf(a, b),
+  RewrittenTo(b, c)
+
+// Retrieval wiring: every labeled subject is a text unit whose text is its
+// label; comments extend it. Retrieval is permissive on this store: the
+// loader asserts CanRetrieveSubject facts directly per subject (a head
+// variable with no positive binding is unsafe, so no rule here).
+TextUnit(subject) :-
+  Label(subject, _)
+
+TextUnitText(unit, text) :-
+  Label(unit, text)
