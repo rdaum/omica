@@ -27,6 +27,7 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 import k "../../mica/kernel"
 import r "../../mica/runtime"
@@ -165,26 +166,38 @@ main :: proc() {
 	}
 	defer delete(raw, context.allocator)
 
+	t0 := time.tick_now()
+	// NOTE: buf must live until run_load/run_census return: xml_text
+	// aliases its memory. Do NOT scope buf in the if-block with a defer
+	// (Odin runs block-scoped defers at block end, dangling xml_text ->
+	// SIGSEGV in scan_next_open once pages are reused; ASan proved it).
+	buf: bytes.Buffer
+	have_buf := false
 	xml_text: string
 	if strings.has_suffix(owl_path, ".gz") {
-		buf: bytes.Buffer
-		defer bytes.buffer_destroy(&buf)
 		if err := gzip.load_from_bytes(raw, &buf, len(raw)); err != nil {
 			fmt.eprintf("gzip decode failed: %v\n", err)
 			os.exit(1)
 		}
+		have_buf = true
 		xml_text = string(bytes.buffer_to_bytes(&buf))
 	} else {
 		xml_text = string(raw)
 	}
-	fmt.eprintf("decoded %d bytes of XML\n", len(xml_text))
+	fmt.eprintf(
+		"decoded %d bytes of XML in %.1fs\n",
+		len(xml_text),
+		time.duration_seconds(time.tick_since(t0)),
+	)
 
 	if census_only {
 		run_census(xml_text)
-		return
+	} else {
+		run_load(xml_text, store_path, owl_path, unit, limit, commit_batch, durability)
 	}
-
-	run_load(xml_text, store_path, unit, limit, commit_batch, durability)
+	if have_buf {
+		bytes.buffer_destroy(&buf)
+	}
 }
 
 @(private)
@@ -290,13 +303,13 @@ print_top :: proc(counts: map[string]int, n: int) {
 // the raw tag name.
 @(private)
 scan_next_open :: proc(text: string, pos: int) -> (end: int, is_subject: bool, tag: string) {
-	i := pos
+	i := pos < 0 ? 0 : pos
 	for i < len(text) {
-		lt := strings.index_byte(text[i:], '<')
-		if lt < 0 {
+		rel := strings.index_byte(text[min(i, len(text)):], '<')
+		if rel < 0 {
 			return -1, false, ""
 		}
-		i += lt
+		i += rel
 		if i + 1 >= len(text) {
 			return -1, false, ""
 		}
@@ -312,11 +325,11 @@ scan_next_open :: proc(text: string, pos: int) -> (end: int, is_subject: bool, t
 		}
 		tag = text[i + 1:j]
 		// find end of tag
-		gt := strings.index_byte(text[j:], '>')
-		if gt < 0 {
+		gtrel := strings.index_byte(text[min(j, len(text)):], '>')
+		if gtrel < 0 {
 			return -1, false, ""
 		}
-		end = j + gt + 1
+		end = j + gtrel + 1
 		head := text[i:end]
 		is_subject = strings.contains(head, "rdf:about=")
 		return end, is_subject, tag
@@ -327,19 +340,19 @@ scan_next_open :: proc(text: string, pos: int) -> (end: int, is_subject: bool, t
 // Finds the next `</tag>` close. Returns the offset just past `>`.
 @(private)
 scan_next_close :: proc(text: string, pos: int) -> int {
-	i := pos
+	i := pos < 0 ? 0 : pos
 	for i < len(text) {
-		lt := strings.index_byte(text[i:], '<')
-		if lt < 0 {
+		rel := strings.index_byte(text[min(i, len(text)):], '<')
+		if rel < 0 {
 			return -1
 		}
-		i += lt
+		i += rel
 		if i + 1 < len(text) && text[i + 1] == '/' {
-			gt := strings.index_byte(text[i:], '>')
-			if gt < 0 {
+			gtrel := strings.index_byte(text[min(i, len(text)):], '>')
+			if gtrel < 0 {
 				return -1
 			}
-			return i + gt + 1
+			return i + gtrel + 1
 		}
 		i += 1
 	}
