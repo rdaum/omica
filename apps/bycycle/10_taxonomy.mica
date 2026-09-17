@@ -1,0 +1,34 @@
+// Bycycle taxonomy: transitive closure over Isa/Genls.
+// The loader asserts only direct edges; these rules derive the rest.
+// NOTE: fileins lower rules one file at a time, against the relations
+// declared so far. Every relation a rule body reads must be declared in this
+// file or in one loaded before it (load order: ONTOLOGY in
+// scripts/bycycle-load.sh); otherwise loading fails with "could not lower a
+// rule". Head relations are not restricted this way.
+
+make_relation(:Subsumes, 2)
+make_relation(:InstanceOf, 2)
+make_relation(:DirectChild, 2)
+make_relation(:IndirectChild, 2)
+
+Subsumes(ancestor, descendant) :-
+  Genls(descendant, ancestor)
+
+Subsumes(ancestor, descendant) :-
+  Genls(descendant, middle),
+  Subsumes(ancestor, middle)
+
+InstanceOf(item, collection) :-
+  Isa(item, collection)
+
+InstanceOf(item, ancestor) :-
+  Isa(item, collection),
+  Subsumes(ancestor, collection)
+
+DirectChild(parent, child) :-
+  Genls(child, parent),
+  not IndirectChild(parent, child)
+
+IndirectChild(parent, child) :-
+  Genls(child, middle),
+  Subsumes(parent, middle)

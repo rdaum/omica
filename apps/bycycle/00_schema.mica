@@ -1,0 +1,34 @@
+// Bycycle ontology: schema for OpenCyc facts loaded by tools/owlstream.
+// OWL facts pass through the loader as assertions; these relations are the
+// schema they land in. Core taxonomic relationships first; display and
+// provenance relations alongside. Inferencing rules below derive the
+// closure the loader does not materialize.
+
+make_relation(:Isa, 2)
+make_relation(:Genls, 2)
+make_relation(:DisjointWith, 2)
+make_relation(:QuotedIsa, 2)
+make_relation(:TypeGenls, 2)
+make_relation(:Arg1Pred, 2)
+make_relation(:RewriteOf, 2)
+make_relation(:BroaderTerm, 2)
+
+make_functional_relation(:Label, 2, [0])
+make_functional_relation(:CycLabel, 2, [0])
+make_functional_relation(:Comment, 2, [0])
+make_relation(:Alias, 2)
+make_relation(:SeeAlso, 2)
+make_functional_relation(:WikiName, 2, [0])
+make_functional_relation(:WikiURL, 2, [0])
+make_relation(:SameAs, 2)
+make_relation(:CanRetrieveSubject, 2)
+
+// Audit: loader identity -> OpenCyc GUID string. Invertible mapping from
+// #guid_<fragment> names back to source GUIDs.
+make_functional_relation(:GuidOf, 2, [0])
+
+// Loader durable resume point: functional key :resume ->
+// "owl_path\nbyte_offset\nsubjects_committed". Written after each checkpoint
+// so a killed run resumes exactly where it stopped (no re-scan of
+// already-loaded subjects).
+make_functional_relation(:LoaderState, 2, [0])

@@ -17,6 +17,9 @@ policy, task effects, and host integration.
   drive the source-provider computed relations.
 - `chat/`: a smaller WebTransport DOM sync chat example.
 - `web/`: HTTP host handlers and relational route fileins.
+- `bycycle/`: OpenCyc commonsense knowledge base: schema, taxonomy/constraint/graph
+  inference rules, and the durable resume contract for `tools/owlstream`. Load with
+  `scripts/bycycle-load.sh` (see [`bycycle/README.md`](./bycycle/README.md)).
 
 ## Guide Examples
 
