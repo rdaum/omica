@@ -38,6 +38,8 @@ desktop.ini
 *.tmp
 /filein
 /filein.bin
+/owlstream
+/owlstream.bin
 
 # Local web host build cache
 .cache/

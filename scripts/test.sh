@@ -270,7 +270,7 @@ run_tsan() {
 build_tools() {
   note "build tools"
   local tool
-  for tool in filein repl webhost parse_corpus; do
+  for tool in filein repl webhost parse_corpus owlstream; do
     if run_timeout "${test_timeout}" "${odin_bin}" build "tools/${tool}" \
       -out:"${bin_dir}/${tool}"; then
       pass "build:${tool}"
@@ -331,6 +331,118 @@ run_web_smoke() {
   wait "${pid}" 2>/dev/null || true
   rm -rf "${tmp}"
   return "${rc}"
+}
+
+# The bycycle ontology (mirror of ONTOLOGY in scripts/bycycle-load.sh).
+bycycle_fileins=(
+  apps/bycycle/00_schema.mica
+  apps/bycycle/10_taxonomy.mica
+  apps/bycycle/20_constraints.mica
+  apps/bycycle/30_graph.mica
+  apps/shared/retrieval.mica
+)
+owl_fixture=tools/owlstream/testdata/fixture.owl
+
+# Everything the owlstream fixture should load, one query per line.
+owl_fingerprint_queries=(
+  'return Label(#guid_Mx4rTestAnimalGuid000001, ?l)'
+  'return Alias(#guid_Mx4rTestAnimalGuid000001, ?l)'
+  'return WikiName(#guid_Mx4rTestAnimalGuid000001, ?l)'
+  'return WikiURL(#guid_Mx4rTestAnimalGuid000001, ?l)'
+  'return Comment(#guid_Mx4rTestAnimalGuid000001, ?l)'
+  'return Label(#guid_Mx4rTestDogGuid000000002, ?l)'
+  'return Comment(#guid_Mx4rTestDogGuid000000002, ?l)'
+  'return len(Subsumes(?a, ?d))'
+  'return len(InstanceOf(?i, ?c))'
+  'return len(InconsistentWith(?x, ?a, ?b))'
+  'return len(GuidOf(?i, ?g))'
+  'return len(CanRetrieveSubject(#bycycle_reader, ?s))'
+)
+owl_fingerprint_expected='[:l] {["Animal"]}
+[:l] {["Beast"]}
+[:l] {["Animal"]}
+[:l] {["http://en.wikipedia.org/wiki/Animal"]}
+[:l] {["A <b>living</b> thing &amp; more"]}
+[:l] {["Dog & kin"]}
+[:l] {["Canines"]}
+1
+3
+2
+4
+4'
+
+# Prints the fixture queries' answers against a store, one per line.
+owl_fingerprint() {
+  local filein="$1" store="$2" query
+  for query in "${owl_fingerprint_queries[@]}"; do
+    run_timeout "${test_timeout}" "${filein}" --store "${store}" --eval "${query}" 2>&1 || true
+  done
+}
+
+# owlstream: load the fixture in one pass, and again in --limit slices that
+# resume; both must match the expected facts, a rerun must change nothing, and
+# a failed load must not leave the store locked.
+run_owlstream_checks() {
+  local filein="$1" owlstream="$2" tmp="$3" store out
+  for store in "${tmp}/owl-once" "${tmp}/owl-resumed"; do
+    run_timeout "${test_timeout}" "${filein}" --store "${store}" --unit bycycle \
+      "${bycycle_fileins[@]}" --checkpoint >/dev/null
+  done
+
+  if run_timeout "${test_timeout}" "${owlstream}" --owl "${owl_fixture}" \
+    --store "${tmp}/owl-once" --commit-batch 3 --checkpoint \
+    --retrieval-actor bycycle_reader >"${tmp}/owl-once.log" 2>&1; then
+    out="$(owl_fingerprint "${filein}" "${tmp}/owl-once")"
+    if [[ "${out}" == "${owl_fingerprint_expected}" ]]; then
+      pass "integration:owlstream-load"
+    else
+      problem "integration:owlstream-load: unexpected facts"
+      diff <(echo "${owl_fingerprint_expected}") <(echo "${out}") || true
+    fi
+  else
+    problem "integration:owlstream-load (${tmp}/owl-once.log)"
+  fi
+
+  # --limit counts subjects scanned this run: 2 + 1 + the rest.
+  local limit ok=1
+  for limit in 2 1 0; do
+    run_timeout "${test_timeout}" "${owlstream}" --owl "${owl_fixture}" \
+      --store "${tmp}/owl-resumed" --commit-batch 3 --checkpoint --limit "${limit}" \
+      --retrieval-actor bycycle_reader >"${tmp}/owl-resumed.log" 2>&1 || ok=0
+  done
+  out="$(owl_fingerprint "${filein}" "${tmp}/owl-resumed")"
+  if [[ "${ok}" -eq 1 && "${out}" == "${owl_fingerprint_expected}" ]] \
+    && grep -q "resuming at byte" "${tmp}/owl-resumed.log"; then
+    pass "integration:owlstream-resume"
+  else
+    problem "integration:owlstream-resume (${tmp}/owl-resumed.log)"
+    diff <(echo "${owl_fingerprint_expected}") <(echo "${out}") || true
+  fi
+
+  # A rerun over a fully loaded store resumes at the end and adds nothing.
+  run_timeout "${test_timeout}" "${owlstream}" --owl "${owl_fixture}" \
+    --store "${tmp}/owl-once" --commit-batch 3 --retrieval-actor bycycle_reader \
+    >"${tmp}/owl-rerun.log" 2>&1 || true
+  out="$(owl_fingerprint "${filein}" "${tmp}/owl-once")"
+  if [[ "${out}" == "${owl_fingerprint_expected}" ]] \
+    && grep -q "^done: 4 subjects, 0 triples" "${tmp}/owl-rerun.log"; then
+    pass "integration:owlstream-rerun"
+  else
+    problem "integration:owlstream-rerun (${tmp}/owl-rerun.log)"
+  fi
+
+  # A store without the ontology fails the load; the store must stay usable.
+  printf 'make_relation(:Color, 1)\n' > "${tmp}/owl-color.mica"
+  run_timeout "${test_timeout}" "${filein}" --store "${tmp}/owl-bare" \
+    --checkpoint "${tmp}/owl-color.mica" >/dev/null
+  if run_timeout "${test_timeout}" "${owlstream}" --owl "${owl_fixture}" \
+    --store "${tmp}/owl-bare" >"${tmp}/owl-bare.log" 2>&1; then
+    problem "integration:owlstream-failure: load without the ontology succeeded"
+  elif [[ -e "${tmp}/owl-bare/LOCK" ]]; then
+    problem "integration:owlstream-failure: failed load left the store locked"
+  else
+    pass "integration:owlstream-failure"
+  fi
 }
 
 run_integration() {
@@ -395,6 +507,8 @@ run_integration() {
   else
     problem "integration:store-mutation: expected true, got '${out}'"
   fi
+
+  run_owlstream_checks "${filein}" "${bin_dir}/owlstream" "${tmp}"
 
   # REPL evaluates a line.
   printf '1 + 1\n' > "${tmp}/repl.in"

@@ -1,0 +1,35 @@
+// Bycycle taxonomy: transitive closure over Isa/Genls.
+// The loader asserts only direct edges; these rules derive the rest.
+// NOTE: load order does not constrain these rules. world_load declares every
+// file's relations before it lowers any rule, so a rule may read or derive a
+// relation declared in any file of the same load. What matters is the file
+// set: leave out the file declaring a body relation (20_constraints reads
+// InstanceOf/Subsumes from here) and loading fails with "could not lower a
+// rule".
+
+make_relation(:Subsumes, 2)
+make_relation(:InstanceOf, 2)
+make_relation(:DirectChild, 2)
+make_relation(:IndirectChild, 2)
+
+Subsumes(ancestor, descendant) :-
+  Genls(descendant, ancestor)
+
+Subsumes(ancestor, descendant) :-
+  Genls(descendant, middle),
+  Subsumes(ancestor, middle)
+
+InstanceOf(item, collection) :-
+  Isa(item, collection)
+
+InstanceOf(item, ancestor) :-
+  Isa(item, collection),
+  Subsumes(ancestor, collection)
+
+DirectChild(parent, child) :-
+  Genls(child, parent),
+  not IndirectChild(parent, child)
+
+IndirectChild(parent, child) :-
+  Genls(child, middle),
+  Subsumes(parent, middle)

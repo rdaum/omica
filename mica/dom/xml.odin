@@ -252,39 +252,41 @@ dom_xml_append_text :: proc(
 }
 
 // Decodes the predefined entities and numeric character references. Unknown
-// entities are kept verbatim. The result lives until the temp arena resets.
+// entities are kept verbatim. The result lives until the temp arena resets;
+// dom_xml_decode_entities_into (xml_stream.odin) takes an allocator for
+// longer-lived output.
 @(private)
 dom_xml_decode_entities :: proc(text: string) -> string {
-	if !strings.contains(text, "&") {
-		return text
-	}
-	builder: strings.Builder
-	strings.builder_init(&builder, context.temp_allocator)
+	return dom_xml_decode_entities_into(text, context.temp_allocator)
+}
+
+@(private)
+dom_xml_write_decoded :: proc(builder: ^strings.Builder, text: string) {
 	position := 0
 	for position < len(text) {
 		if text[position] != '&' {
-			strings.write_byte(&builder, text[position])
+			strings.write_byte(builder, text[position])
 			position += 1
 			continue
 		}
 		semicolon := strings.index_byte(text[position:], ';')
 		if semicolon < 0 {
-			strings.write_byte(&builder, '&')
+			strings.write_byte(builder, '&')
 			position += 1
 			continue
 		}
 		entity := text[position + 1:position + semicolon]
 		switch entity {
 		case "amp":
-			strings.write_byte(&builder, '&')
+			strings.write_byte(builder, '&')
 		case "lt":
-			strings.write_byte(&builder, '<')
+			strings.write_byte(builder, '<')
 		case "gt":
-			strings.write_byte(&builder, '>')
+			strings.write_byte(builder, '>')
 		case "quot":
-			strings.write_byte(&builder, '"')
+			strings.write_byte(builder, '"')
 		case "apos":
-			strings.write_byte(&builder, '\'')
+			strings.write_byte(builder, '\'')
 		case:
 			if strings.has_prefix(entity, "#") {
 				digits := entity[1:]
@@ -296,20 +298,19 @@ dom_xml_decode_entities :: proc(text: string) -> string {
 				codepoint, parsed := strconv.parse_int(digits, base)
 				r := rune(codepoint)
 				if !parsed || !utf8.valid_rune(r) {
-					strings.write_byte(&builder, '&')
+					strings.write_byte(builder, '&')
 					position += 1
 					continue
 				}
-				strings.write_rune(&builder, r)
+				strings.write_rune(builder, r)
 			} else {
-				strings.write_byte(&builder, '&')
+				strings.write_byte(builder, '&')
 				position += 1
 				continue
 			}
 		}
 		position += semicolon + 1
 	}
-	return strings.to_string(builder)
 }
 
 @(private)
