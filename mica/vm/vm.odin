@@ -1822,6 +1822,11 @@ vm_scan_collect :: proc(state: ^VM, base: int, instr: Instruction) -> bool {
 	if !vm_scan_rows(state, base, pattern, &rows) {
 		return false
 	}
+	// The result relation keeps its rows past this transaction, whose snapshot
+	// storage the scanned rows point into: copy them into the task's memory.
+	for &row in rows {
+		row = v.tuple_deep_copy(state.allocator, row)
+	}
 	// Only named query variables are result columns; bound values and
 	// wildcards participate in matching but do not appear in the heading.
 	output_count := 0
@@ -1877,7 +1882,7 @@ first_binding_visit :: proc(user: rawptr, row: v.Tuple) -> bool {
 	ctx := (^First_Binding_Context)(user)
 	for cell, index in ctx.pattern.cells {
 		if cell.kind == .Output {
-			ctx.vm.registers[ctx.base + int(cell.operand)] = v.tuple_values(row)[index]
+			ctx.vm.registers[ctx.base + int(cell.operand)] = v.value_deep_copy(ctx.vm.allocator, v.tuple_values(row)[index])
 		}
 	}
 	ctx.found = true
@@ -1941,7 +1946,9 @@ vm_scan_one :: proc(state: ^VM, base: int, instr: Instruction) -> bool {
 	}
 	for cell, index in pattern.cells {
 		if cell.kind == .Output {
-			state.registers[base + int(cell.operand)] = v.tuple_values(rows[0])[index]
+			// Scanned rows point into snapshot storage, which is freed once the
+			// transaction ends; the task keeps its own copy.
+			state.registers[base + int(cell.operand)] = v.value_deep_copy(state.allocator, v.tuple_values(rows[0])[index])
 		}
 	}
 	state.registers[base + int(instr.a)] = v.value_bool(true)
