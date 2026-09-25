@@ -137,20 +137,16 @@ relation_source_visit :: proc(
 
 	if source.use_stored_derived {
 		if source.snapshot != nil {
-			for row in snapshot_derived_rows(source.snapshot, relation) {
-				if v.tuple_matches_bindings(row, bindings) {
-					if !visit(user, row) {
-						return true
-					}
+			if block, ok := snapshot_derived_block(source.snapshot, relation); ok {
+				stored := Visit_State{visit = visit, user = user}
+				relation_block_visit(block, bindings, visit_state_trampoline, &stored)
+				if stored.stopped {
+					return true
 				}
 			}
 		} else if source.transaction != nil {
-			for row in transaction_derived_rows(source.transaction, relation) {
-				if v.tuple_matches_bindings(row, bindings) {
-					if !visit(user, row) {
-						return true
-					}
-				}
+			if transaction_visit_derived(source.transaction, relation, bindings, visit, user) {
+				return true
 			}
 		}
 	}
@@ -217,16 +213,12 @@ relation_source_scan_append :: proc(
 		column_sink_append_derived(sink, source.derived, relation, bindings)
 	}
 	if source.use_stored_derived {
-		stored: []v.Tuple
 		if source.snapshot != nil {
-			stored = snapshot_derived_rows(source.snapshot, relation)
-		} else if source.transaction != nil {
-			stored = transaction_derived_rows(source.transaction, relation)
-		}
-		for row in stored {
-			if v.tuple_matches_bindings(row, bindings) {
-				column_sink_append_tuple(sink, row)
+			if block, ok := snapshot_derived_block(source.snapshot, relation); ok {
+				relation_block_visit(block, bindings, column_sink_visit, sink)
 			}
+		} else if source.transaction != nil {
+			transaction_visit_derived(source.transaction, relation, bindings, column_sink_visit, sink)
 		}
 	}
 	return .None

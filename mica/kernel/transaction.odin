@@ -76,6 +76,9 @@ Transaction :: struct {
 	buffer_rebase_usage: buf.Budget_Usage,
 	derived:             []Derived_Relation,
 	derived_valid:       bool,
+	// With no writes staged the transaction sees its base's derived blocks;
+	// `derived` is only its private view after writes.
+	derived_from_base:   bool,
 	read_only:           bool,
 }
 
@@ -707,14 +710,63 @@ transaction_tuple_for_key :: proc(
 	return found, found != nil
 }
 
-// Returns transaction-stored derived rows for a relation.
-transaction_derived_rows :: proc(transaction: ^Transaction, relation: Relation_ID) -> []v.Tuple {
-	for derived in transaction.derived {
-		if derived.relation == relation {
-			return derived.tuples
+// The derived rows the transaction sees for `relation`, materialized into
+// `alloc` (tuples still point into the block or the private view).
+transaction_derived_rows :: proc(
+	transaction: ^Transaction,
+	relation: Relation_ID,
+	alloc := context.temp_allocator,
+) -> []v.Tuple {
+	rows := make([dynamic]v.Tuple, alloc)
+	arity := 0
+	if metadata, ok := snapshot_relation_metadata(transaction.base, relation); ok {
+		arity = int(metadata.arity)
+	}
+	if arity == 0 {
+		for derived in transaction.derived {
+			if derived.relation == relation && len(derived.tuples) > 0 {
+				arity = v.tuple_arity(derived.tuples[0])
+			}
 		}
 	}
-	return nil
+	bindings := make([]v.Binding, arity, alloc)
+	transaction_visit_derived(transaction, relation, bindings, proc(user: rawptr, row: v.Tuple) -> bool {
+			append((^[dynamic]v.Tuple)(user), row)
+			return true
+		}, &rows)
+	return rows[:]
+}
+
+// Visits the derived rows the transaction sees for `relation` that match
+// `bindings`: its base snapshot's derived block when it has staged no writes,
+// otherwise its private view. Returns true when `visit` stopped the walk.
+transaction_visit_derived :: proc(
+	transaction: ^Transaction,
+	relation: Relation_ID,
+	bindings: []v.Binding,
+	visit: proc(user: rawptr, row: v.Tuple) -> bool,
+	user: rawptr,
+) -> bool {
+	if transaction.derived_from_base {
+		block, ok := snapshot_derived_block(transaction.base, relation)
+		if !ok {
+			return false
+		}
+		state := Visit_State{visit = visit, user = user}
+		relation_block_visit(block, bindings, visit_state_trampoline, &state)
+		return state.stopped
+	}
+	for derived in transaction.derived {
+		if derived.relation != relation {
+			continue
+		}
+		for row in derived.tuples {
+			if v.tuple_matches_bindings(row, bindings) && !visit(user, row) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Recomputes derived facts visible in the transaction, if stale. Evaluation
@@ -733,7 +785,8 @@ transaction_evaluate_derived :: proc(transaction: ^Transaction) -> Kernel_Error 
 	if len(transaction.writes) == 0 &&
 	   len(transaction.buffer_writes) == 0 &&
 	   len(transaction.catalog_changes) == 0 {
-		transaction.derived = transaction.base.derived
+		transaction.derived = nil
+		transaction.derived_from_base = true
 		transaction.derived_valid = true
 		return .None
 	}
@@ -760,6 +813,7 @@ transaction_evaluate_derived :: proc(transaction: ^Transaction) -> Kernel_Error 
 	}
 
 	transaction.derived = derived_relations_from(transaction.allocator, &result, arena)
+	transaction.derived_from_base = false
 	transaction.derived_valid = true
 	return .None
 }
@@ -1074,7 +1128,7 @@ transaction_build_candidate :: proc(
 
 	transaction_buffer_materialize(transaction, current, fork)
 
-	kernel_compute_derived(kernel, fork)
+	kernel_compute_derived(kernel, fork, current)
 	return fork
 }
 
@@ -1123,7 +1177,7 @@ transaction_rebase_in_place :: proc(
 	copy(candidate.rules, winner.rules)
 	candidate.version = winner.version + 1
 	candidate.parent = winner
-	kernel_compute_derived(kernel, candidate)
+	kernel_compute_derived(kernel, candidate, winner)
 	return true
 }
 

@@ -848,8 +848,9 @@ test_read_only_transaction_reuses_snapshot_derived :: proc(t: ^testing.T) {
 
 	base_rows := snapshot_derived_rows(reader.base, reach)
 	tx_rows := transaction_derived_rows(&reader, reach)
-	testing.expect(t, len(base_rows) > 0)
-	testing.expect(t, raw_data(base_rows) == raw_data(tx_rows))
+	testing.expect(t, len(base_rows) > 0 && len(tx_rows) == len(base_rows))
+	testing.expect(t, reader.derived_from_base)
+	testing.expect(t, raw_data(v.tuple_values(base_rows[0])) == raw_data(v.tuple_values(tx_rows[0])))
 
 	// Staging a write invalidates the reuse and the transaction sees its own
 	// facts derived over the overlay.
@@ -857,7 +858,8 @@ test_read_only_transaction_reuses_snapshot_derived :: proc(t: ^testing.T) {
 	overlay_rows := transaction_rows(&reader, reach, 2)
 	testing.expect(t, has_tuple(overlay_rows[:], tuple_of(a, b)))
 	test_rows := transaction_derived_rows(&reader, reach)
-	testing.expect(t, raw_data(snapshot_derived_rows(reader.base, reach)) != raw_data(test_rows))
+	testing.expect(t, !reader.derived_from_base)
+	testing.expect(t, raw_data(v.tuple_values(snapshot_derived_rows(reader.base, reach)[0])) != raw_data(v.tuple_values(test_rows[0])))
 	delete(overlay_rows)
 }
 
@@ -3313,3 +3315,4 @@ test_chunk_arenas_fit_their_rows :: proc(t: ^testing.T) {
 	data := ROWS * (size_of(v.Tuple) + 2 * size_of(v.Value))
 	testing.expectf(t, capacity <= data * 3 / 2, "chunk arenas hold %d bytes for %d of rows", capacity, data)
 }
+

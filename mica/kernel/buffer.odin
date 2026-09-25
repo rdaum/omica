@@ -1428,7 +1428,7 @@ kernel_tombstone_relation :: proc(kernel: ^Kernel, metadata: Relation_Metadata) 
 			// A tombstoned entry keeps no reversion history.
 			buffer_history_forget(&kernel.buffer_history, metadata.id)
 		}
-		kernel_compute_derived(kernel, next)
+		kernel_compute_derived(kernel, next, current)
 		previous, published := kernel_try_publish(kernel, current, next)
 		if published {
 			kernel_retire(kernel, previous)

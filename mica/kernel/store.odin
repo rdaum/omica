@@ -276,11 +276,21 @@ relation_block_build_pooled :: proc(
 	rows := make([]v.Tuple, len(tuples), context.temp_allocator)
 	copy(rows, tuples)
 	rows = sorted_unique_rows(rows, context.temp_allocator)
+	return relation_block_from_canonical(kernel.arena_pool, metadata, rows)
+}
 
-	block_arena := arena_pool_take(kernel.arena_pool)
+// Builds a block from rows already in canonical order (sorted, no
+// duplicates), deep-copying them into chunks. The block arena comes from
+// `pool`, which releasing the block returns it to.
+relation_block_from_canonical :: proc(
+	pool: ^Arena_Pool,
+	metadata: Relation_Metadata,
+	rows: []v.Tuple,
+) -> ^Relation_Block {
+	block_arena := arena_pool_take(pool)
 	block_alloc := frame_arena_allocator(block_arena)
 
-	chunks := chunks_from_rows(kernel.arena_pool, rows, block_alloc)
+	chunks := chunks_from_rows(pool, rows, block_alloc)
 	// Assign the whole struct: the arena is recycled without zeroing, so a
 	// field left to `new` could hold the previous block's index cache.
 	block := new(Relation_Block, block_alloc)
@@ -292,7 +302,7 @@ relation_block_build_pooled :: proc(
 		refs       = 1,
 		serial     = relation_block_next_serial(),
 		arena      = block_arena,
-		pool       = kernel.arena_pool,
+		pool       = pool,
 	}
 	fill_chunk_rows(block)
 	return block

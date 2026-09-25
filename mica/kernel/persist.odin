@@ -171,7 +171,7 @@ kernel_install_buffer_checkpoint :: proc(
 			)
 			snapshot_set_buffer(next, block)
 		}
-		snapshot_compute_derived(next, kernel)
+		snapshot_compute_derived(next, kernel, current)
 		previous, published := kernel_try_publish(kernel, current, next)
 		if published {
 			kernel_retire(kernel, previous)
@@ -195,7 +195,7 @@ kernel_install_checkpoint :: proc(kernel: ^Kernel, entries: []Checkpoint_Relatio
 			}
 			snapshot_set_block(next, entry.block)
 		}
-		snapshot_compute_derived(next, kernel)
+		snapshot_compute_derived(next, kernel, current)
 		previous, published := kernel_try_publish(kernel, current, next)
 		if published {
 			kernel_retire(kernel, previous)

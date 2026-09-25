@@ -524,3 +524,99 @@ test_rounds_release_old_deltas :: proc(t: ^testing.T) {
 	live := rows * (2 * size_of(v.Value) + size_of(u64)) + len(entry.index) * size_of(u32)
 	testing.expectf(t, int(arena.total_used) < 3 * live, "evaluation arena holds %d bytes (%.2fx) for %d live", arena.total_used, f64(arena.total_used) / f64(live), live)
 }
+
+// Derived relations are blocks: a commit that changes nothing a rule reads
+// shares the base snapshot's derived block; one that changes an input gets a
+// new block with the new rows; derived rows never enter snapshot.blocks.
+@(test)
+test_derived_blocks_shared_until_inputs_change :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	kernel: Kernel
+	kernel_init(&kernel)
+	defer kernel_destroy(&kernel)
+	e := create_relation(&kernel, 1, "E", 2)
+	other := create_relation(&kernel, 3, "Other", 1)
+	path := create_relation(&kernel, 2, "T", 2)
+	x, y, z := v.symbol_intern("x"), v.symbol_intern("y"), v.symbol_intern("z")
+	X, Y, Z := term_var(x), term_var(y), term_var(z)
+	install(t, &kernel, 950, rule_new(path, []Term{X, Y}, []Rule_Body_Item{body_atom(atom_positive(e, []Term{X, Y}))}))
+	install(t, &kernel, 951, rule_new(path, []Term{X, Z}, []Rule_Body_Item {
+		body_atom(atom_positive(e, []Term{X, Y})),
+		body_atom(atom_positive(path, []Term{Y, Z})),
+	}))
+	tx := kernel_begin(&kernel)
+	for i in 0 ..< 3 {
+		transaction_assert(&tx, e, tuple_of(must_int(i64(i)), must_int(i64(i + 1))))
+	}
+	commit_transaction(t, &tx)
+	first, ok := snapshot_derived_block(kernel.current, path)
+	testing.expect(t, ok)
+	testing.expect_value(t, relation_block_len(first), 6)
+	_, in_blocks := snapshot_relation_block(kernel.current, path)
+	testing.expect(t, !in_blocks)
+
+	tx = kernel_begin(&kernel)
+	transaction_assert(&tx, other, tuple_of(must_int(9)))
+	commit_transaction(t, &tx)
+	second, _ := snapshot_derived_block(kernel.current, path)
+	testing.expect(t, second == first)
+
+	tx = kernel_begin(&kernel)
+	transaction_assert(&tx, e, tuple_of(must_int(3), must_int(4)))
+	commit_transaction(t, &tx)
+	third, _ := snapshot_derived_block(kernel.current, path)
+	testing.expect(t, third != first)
+	testing.expect_value(t, relation_block_len(third), 10)
+	testing.expect_value(t, len(snapshot_derived_rows(kernel.current, path)), 10)
+}
+
+// A derived relation that loses all its rows has no rows in the next
+// snapshot, not the base's.
+@(test)
+test_derived_block_emptied_by_retract :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	kernel: Kernel
+	kernel_init(&kernel)
+	defer kernel_destroy(&kernel)
+	e := create_relation(&kernel, 1, "E", 2)
+	path := create_relation(&kernel, 2, "T", 2)
+	x, y := v.symbol_intern("x"), v.symbol_intern("y")
+	install(t, &kernel, 952, rule_new(path, []Term{term_var(x), term_var(y)}, []Rule_Body_Item{body_atom(atom_positive(e, []Term{term_var(x), term_var(y)}))}))
+	row := tuple_of(must_int(1), must_int(2))
+	tx := kernel_begin(&kernel)
+	transaction_assert(&tx, e, row)
+	commit_transaction(t, &tx)
+	testing.expect_value(t, len(snapshot_derived_rows(kernel.current, path)), 1)
+	tx = kernel_begin(&kernel)
+	transaction_retract(&tx, e, row)
+	commit_transaction(t, &tx)
+	testing.expect_value(t, len(snapshot_derived_rows(kernel.current, path)), 0)
+	testing.expect(t, !snapshot_contains(kernel.current, path, row))
+}
+
+// A relation with asserted and derived rows: scans with a bound column and
+// snapshot_contains see both kinds, through the derived block.
+@(test)
+test_scan_sees_asserted_and_derived_block_rows :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	kernel: Kernel
+	kernel_init(&kernel)
+	defer kernel_destroy(&kernel)
+	e := create_relation(&kernel, 1, "E", 2)
+	path := create_relation(&kernel, 2, "T", 2)
+	x, y := v.symbol_intern("x"), v.symbol_intern("y")
+	install(t, &kernel, 953, rule_new(path, []Term{term_var(x), term_var(y)}, []Rule_Body_Item{body_atom(atom_positive(e, []Term{term_var(x), term_var(y)}))}))
+	tx := kernel_begin(&kernel)
+	transaction_assert(&tx, e, tuple_of(must_int(1), must_int(2)))
+	transaction_assert(&tx, path, tuple_of(must_int(1), must_int(5)))
+	commit_transaction(t, &tx)
+	_, has_derived := snapshot_derived_block(kernel.current, path)
+	testing.expect(t, has_derived)
+	source := Relation_Source{kernel = &kernel, snapshot = kernel.current, use_stored_derived = true}
+	rows: [dynamic]v.Tuple
+	defer delete(rows)
+	relation_source_scan_into(&source, path, []v.Binding{v.binding_of(must_int(1)), {}}, &rows)
+	testing.expect_value(t, len(rows), 2)
+	testing.expect(t, snapshot_contains(kernel.current, path, tuple_of(must_int(1), must_int(2))))
+	testing.expect(t, snapshot_contains(kernel.current, path, tuple_of(must_int(1), must_int(5))))
+}
