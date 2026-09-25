@@ -3289,3 +3289,27 @@ test_functional_staging_scales_linearly :: proc(t: ^testing.T) {
 		testing.fail_now(t, "replacement key is not visible")
 	}
 }
+
+// A block's chunk arenas hold about the rows they store: each 128-row chunk
+// used to take a pooled arena with a 64 KB first block (16x its data), which
+// would make 17.9M derived rows cost ~9 GB.
+@(test)
+test_chunk_arenas_fit_their_rows :: proc(t: ^testing.T) {
+	kernel: Kernel
+	kernel_init(&kernel)
+	defer kernel_destroy(&kernel)
+	defer free_all(context.temp_allocator)
+	ROWS :: 100_000
+	rows := make([]v.Tuple, ROWS, context.temp_allocator)
+	for r in 0 ..< ROWS {
+		rows[r] = tuple_of(must_int(i64(r)), must_int(i64(r % 97)))
+	}
+	block := relation_block_build_pooled(&kernel, Relation_Metadata{id = 1, arity = 2}, rows)
+	defer relation_block_release(block)
+	capacity := 0
+	for chunk in block.chunks {
+		capacity += frame_arena_capacity(chunk.arena)
+	}
+	data := ROWS * (size_of(v.Tuple) + 2 * size_of(v.Value))
+	testing.expectf(t, capacity <= data * 3 / 2, "chunk arenas hold %d bytes for %d of rows", capacity, data)
+}

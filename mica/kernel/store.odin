@@ -129,10 +129,21 @@ deep_copy_rows :: proc(alloc: mem.Allocator, rows: []v.Tuple) -> []v.Tuple {
 	return owned
 }
 
-// Creates a chunk owning deep copies of `rows`. With a pool, the chunk arena
-// is pooled and recycled; without one it is owned and destroyed on release.
+// Creates a chunk owning deep copies of `rows`, in an arena whose first block
+// fits them: the tuple array, the cells and the chunk itself (heap payloads
+// such as strings spill into further blocks). A pooled arena would start at
+// FRAME_DEFAULT_BLOCK_SIZE, 16x a 128-row chunk of scalars, or keep up to
+// FRAME_POOL_KEEP from an earlier use, so chunk arenas are not pooled: the
+// chunk owns its arena and destroys it on release. `pool` is accepted for the
+// callers' signature and unused.
 relation_chunk_create :: proc(pool: ^Arena_Pool, rows: []v.Tuple) -> ^Relation_Chunk {
-	arena := new_arena(pool)
+	cells := 0
+	for row in rows {
+		cells += v.tuple_arity(row)
+	}
+	need := len(rows) * size_of(v.Tuple) + cells * size_of(v.Value) + size_of(Relation_Chunk) + 64
+	arena := new(Frame_Arena, runtime.default_allocator())
+	frame_arena_init(arena, need)
 	alloc := frame_arena_allocator(arena)
 
 	owned := deep_copy_rows(alloc, rows)
@@ -141,7 +152,7 @@ relation_chunk_create :: proc(pool: ^Arena_Pool, rows: []v.Tuple) -> ^Relation_C
 	chunk.tuples = owned
 	chunk.refs = 1
 	chunk.arena = arena
-	chunk.pool = pool
+	chunk.pool = nil
 	chunk.generation = next_chunk_generation()
 	return chunk
 }
