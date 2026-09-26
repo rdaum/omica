@@ -164,6 +164,52 @@ $ tools/filein --eval '
 
 The `compile(source: String) -> Result<Function, Error>` builtin compiles source at runtime (issue #118). This RFC references it without redesigning its semantics, authority model, or program registry integration.
 
+### Strings, Loops and Comprehensions
+
+These forms run in omica and are rejected by Rust mica at 2bbceb0. Ryan Daum's Rust parity plan ([gist](https://gist.github.com/rdaum/4891ed160b0e38e9079744e1f1a0d854)) found the same set and adds them to Rust. Results below are differential runs D-013 and D-015 to D-019.
+
+`len` MUST accept a string and count its Unicode scalar values. [R-len-string]
+
+<!-- evidence: @R-len-string -->
+| Input | omica | Rust 2bbceb0 |
+|---|---|---|
+| `len([1, 2, 3])` | `3` | `3` |
+| `len({:a -> 1, :b -> 2})` | `2` | `2` |
+| `len("héllo")` | `5` | error: len expects a list, map, or relation |
+
+Indexing a string MUST address Unicode scalar values and yield the scalar's code point; an index past the end MUST raise `E_INDEX`. [R-string-index-scalar]
+
+<!-- evidence: @R-string-index-scalar -->
+| Input | omica | Rust 2bbceb0 |
+|---|---|---|
+| `"héllo"[0]` | `104` | `E_INDEX` |
+| `"héllo"[1]` | `233` | `E_INDEX` |
+| `"hello"[10]` | `E_INDEX` | `E_INDEX` |
+
+The runtime MUST provide `string_append`, `string_span` and `string_find_any`. [R-string-builtins]
+
+<!-- evidence: @R-string-builtins -->
+| Input | omica | Rust 2bbceb0 |
+|---|---|---|
+| `string_append("hello", " world")` | `"hello world"` | no applicable method |
+| `string_span("hello world", 0, " ")` | `0` | no applicable method |
+| `string_find_any("hello world", 0, " o")` | `4` | no applicable method |
+
+A `for` header MUST accept a list pattern that binds each element of the item, and `_` in a `for` header MUST bind nothing. [R-loop-patterns]
+
+<!-- evidence: @R-loop-patterns -->
+| Input | omica | Rust 2bbceb0 |
+|---|---|---|
+| `for [a, b] in [[1, 2], [3, 4]]` appending `a + b` | `[3, 7]` | parse error: expected expression |
+| `for _ in [1, 2, 3]` counting iterations | `3` | parse error: expected expression |
+
+A list comprehension `[expr for x in list]` MUST evaluate `expr` once per element, in order, and yield the results as a list. [R-list-comprehension]
+
+<!-- evidence: @R-list-comprehension -->
+| Input | omica | Rust 2bbceb0 |
+|---|---|---|
+| `[x * 2 for x in [1, 2, 3]]` | `[2, 4, 6]` | parse error: expected end after for |
+
 ## Formal Grammar
 
 Pattern matching integrates at the parser level; this ABNF captures new shapes:
@@ -229,6 +275,11 @@ Existing code continues to work. Try/catch with static codes remains valid; dyna
 | Per-method dispatch | Yes | Yes | Yes | Parity |
 | Closures as values | Yes | Yes | Yes | Parity |
 | Runtime compile | Yes | No | Reference (#118) | Gap → #118 |
+| `len` on strings | No | Yes | Yes | Improvement |
+| String indexing by scalar | No | Yes | Yes | Improvement |
+| `string_append`, `string_span`, `string_find_any` | No | Yes | Yes | Improvement |
+| Loop list patterns and `_` | No | Yes | Yes | Improvement |
+| List comprehensions | No | Yes | Yes | Improvement |
 
 ---
 

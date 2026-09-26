@@ -169,11 +169,13 @@ The runtime maintains these system relations to describe the world. All are read
 **Immutability guarantee:** The runtime MUST reject all assertions and retractions on system catalogue relations. [R-catalogue-readonly]
 
 <!-- evidence: @R-catalogue-readonly -->
-| Operation | Expected Behavior | Source |
-|-----------|-------------------|--------|
-| Asserting `Relation(123)` via `assert` | Fails: "cannot mutate system relation Relation" | omica [mica/runtime/runtime.odin:1156-1179](https://github.com/rdaum/omica/blob/5a22a77cc245/mica/runtime/runtime.odin#L1156-L1179) |
-| Retracting `RelationName(123, :foo)` via `retract` | Fails: "cannot mutate system relation RelationName" | System relations hardcoded |
-| Querying `Relation(R)` via `query` | Returns facts created by make_relation | Read-only |
+| Operation (differential run D-021) | omica 5a22a77 | Rust 2bbceb0 |
+|---|---|---|
+| `assert Relation(123)` | accepted | rejected: relation is read-only |
+| `assert Arity(:foo, 2)`, then `Arity(:foo, ?n)` | accepted; returns `{[2]}` | rejected: relation is read-only |
+| `retract RelationName(_, :foo)` (no match) | accepted | accepted |
+
+omica does not meet this requirement yet: its list of read-only system relations ([mica/runtime/runtime.odin:1156-1179](https://github.com/rdaum/omica/blob/5a22a77cc245/mica/runtime/runtime.odin#L1156-L1179)) guards identity destruction, not `assert` and `retract`. Rust rejects writes with an uncatchable error and skips the check when a wildcard retract matches nothing; Ryan Daum's Rust parity plan ([gist](https://gist.github.com/rdaum/4891ed160b0e38e9079744e1f1a0d854)) makes these a catchable `E_READ_ONLY`, empty matches included. An implementation SHOULD raise the same catchable `E_READ_ONLY`.
 
 Catalogues are the authoritative description of the world. Tools, fileout, and upgrade strategies depend on catalogue facts being authoritative. Allowing user mutations would create inconsistency between programme structure and catalogue structure.
 

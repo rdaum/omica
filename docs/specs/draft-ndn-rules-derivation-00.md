@@ -83,6 +83,13 @@ ERROR: rule install failed: Unstratified_Negation
 ```
 
 
+**Holes in rule bodies.** Each `_` in a positive body atom MUST act as its own anonymous variable, matching any value independently of every other `_`. [R-rule-body-hole]
+
+<!-- evidence: @R-rule-body-hole -->
+| Rule, over `R(#a, 1, 2)` and `R(#b, 3, 3)` | omica | Rust 2bbceb0 |
+|---|---|---|
+| `P(?x) :- R(?x, _, _)`, then `P(?x)` | `{[#a], [#b]}` | rejected at parse: holes are not valid here |
+
 ### Rule Installation and Lifecycle
 
 When a rule is installed, the system MUST atomically publish a new snapshot containing the rule's effects. [R-atomic-install]
@@ -279,9 +286,9 @@ Mica is a live database. Every world starts fresh; rules are installed live with
 
 - RFC 2119, RFC 8174: BCP 14 keywords
 - Datalog semantics: Ullman, "Database and Knowledge-Base Systems" (foundational reference for stratified Datalog)
-- Incremental maintenance: omica `docs/incremental-maintenance-design.md` (branch `incremental-maintenance`)
+- Incremental maintenance: omica `docs/incremental-maintenance-design.md`; stage 1 in rdaum/omica#125
 - Rule authority and program installation: rdaum/omica#118
-- Backward-chaining RFC: forthcoming; references this RFC's activation mode interface
+- Backward chaining: draft-ndn-demand-evaluation-00, which uses this RFC's activation mode interface
 
 
 ## Appendix A: Relation to Rust mica
@@ -289,6 +296,7 @@ Mica is a live database. Every world starts fresh; rules are installed live with
 | Behavior | Rust | omica today | This RFC | Class |
 |----------|------|-------------|----------|-------|
 | Unbound head variable validation | Lazy: install succeeds, first read fails with `UnboundHeadVariable` error | Eager: install fails with `Unbound_Head_Variable` error | Eager validation at install time (Rust behavior changes to match omica) | Improvement |
+| `_` holes in positive rule bodies | Rejected at parse | Independent anonymous variables | omica behavior (differential run D-020) | Improvement |
 | Stratification validation | At install time, rejects unstratified rules | At install time, rejects unstratified rules | At install time (no change) | Parity |
 | Negation safety check (unbound terms) | At evaluation time, fails with `UnsafeNegation` | At evaluation time, fails with `Unsafe_Negation` | At evaluation time (no change) | Parity |
 | Guard safety check (unbound operands) | At evaluation time, fails | At evaluation time, fails | At evaluation time (no change) | Parity |

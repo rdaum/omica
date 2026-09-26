@@ -368,6 +368,24 @@ Value is persistable iff all cells are; collections inherit property transitivel
 | [1, capability(1)] | No |
 | List with all persistent | Yes |
 
+## Numeric Conversion Builtins
+
+`parse_int` MUST parse a whole decimal string into an integer and raise `E_INVARG` for a string with no digits or a value outside the integer domain. [R-parse-int] `parse_float` MUST parse a decimal or exponent string into a finite float and raise `E_INVARG` for a non-finite result. [R-parse-float] Both exist in omica and not in Rust mica at 2bbceb0; Ryan Daum's Rust parity plan ([gist](https://gist.github.com/rdaum/4891ed160b0e38e9079744e1f1a0d854)) adds them. `to_int` and `to_float` behave the same in both (differential run D-014).
+
+<!-- evidence: @R-parse-int -->
+| Input | omica | Rust 2bbceb0 |
+|---|---|---|
+| `parse_int("42")` | `42` | no applicable method |
+| `parse_int("abc")` | `E_INVARG`: parse_int found no digits | no applicable method |
+| `parse_int("999999999999999999")` | `E_INVARG`: parse_int is out of range | no applicable method |
+
+<!-- evidence: @R-parse-float -->
+| Input | omica | Rust 2bbceb0 |
+|---|---|---|
+| `parse_float("3.14")` | `3.14` | no applicable method |
+| `parse_float("1.0e2")` | `100` | no applicable method |
+| `parse_float("NaN")` | `E_INVARG`: parse_float is out of range | no applicable method |
+
 ## Out of Scope
 
 **Type system** (draft-ndn-declarations-catalogue-00), **join algorithms** (draft-ndn-rules-derivation-00), **authority model and delegation** (draft-ndn-authority-00), **error recovery** (draft-ndn-language-00).
@@ -393,6 +411,14 @@ Value is persistable iff all cells are; collections inherit property transitivel
 ## Compatibility
 
 RFC formalizes current behavior; Rust and omica implementations already match (differential D-006). No data or code changes required; float canonicalization (-0.0 → +0.0) is a one-time read correction.
+
+## Appendix A: Relation to Rust mica
+
+| Behavior | Rust 2bbceb0 | omica | This RFC | Class |
+|---|---|---|---|---|
+| `parse_int`, `parse_float` | No | Yes | Yes | Improvement |
+| `to_int` on an exactly integral float; `E_TYPE` otherwise | Yes | Yes | Yes | Parity |
+| `to_float` | Yes (prints `4.2e1`) | Yes (prints `42`) | Yes | Parity; float literal printing differs |
 
 ## References
 
