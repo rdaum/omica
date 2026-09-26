@@ -111,7 +111,7 @@ test_index_workspace_tree_with_root :: proc(t: ^testing.T, root_kind: string) {
 	root := fmt.aprintf(
 		"%s/omica-source-test-%d",
 		directory,
-		time.tick_now(),
+		time.tick_now()._nsec,
 		allocator = context.temp_allocator,
 	)
 	defer os.remove_all(root)
@@ -140,7 +140,7 @@ test_index_workspace_tree_with_root :: proc(t: ^testing.T, root_kind: string) {
 	schema_path := fmt.aprintf(
 		"%s/omica-source-schema-%d.mica",
 		directory,
-		time.tick_now(),
+		time.tick_now()._nsec,
 		allocator = context.temp_allocator,
 	)
 	defer os.remove(schema_path)
@@ -180,6 +180,16 @@ test_index_workspace_tree_with_root :: proc(t: ^testing.T, root_kind: string) {
 		indexed_root = fmt.aprintf("%s/missing", root, allocator = context.temp_allocator)
 	}
 	child := fmt.aprintf("%s/src", root, allocator = context.temp_allocator)
+	// The indexer names paths under the root as the opened root directory
+	// reports them (on macOS /var resolves to /private/var), so the expected
+	// child path is built the same way, before the child becomes unreadable.
+	resolved_child := child
+	if root_file, open_err := os.open(root); open_err == nil {
+		if info, stat_err := os.fstat(root_file, context.temp_allocator); stat_err == nil {
+			resolved_child = fmt.aprintf("%s/src", info.fullpath, allocator = context.temp_allocator)
+		}
+		os.close(root_file)
+	}
 	if root_kind == "unreadable_child" {
 		if !testing.expect(t, os.chmod(child, {}) == nil) {return}
 	}
@@ -198,7 +208,7 @@ test_index_workspace_tree_with_root :: proc(t: ^testing.T, root_kind: string) {
 	result := index_world(world, Options{root = indexed_root})
 	if root_kind == "unreadable_child" {
 		testing.expect(t, !result.ok, "failed traversal reported a successful index")
-		testing.expectf(t, strings.contains(result.message, "cannot walk") && strings.contains(result.message, child), "missing traversal error: %s", result.message)
+		testing.expectf(t, strings.contains(result.message, "cannot walk") && strings.contains(result.message, resolved_child), "missing traversal error: %s", result.message)
 		entries, entries_ok := relation_rows(world, "source/RepositoryEntry")
 		defer delete(entries)
 		testing.expect(t, entries_ok)
