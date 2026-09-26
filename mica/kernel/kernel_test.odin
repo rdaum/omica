@@ -3316,3 +3316,31 @@ test_chunk_arenas_fit_their_rows :: proc(t: ^testing.T) {
 	testing.expectf(t, capacity <= data * 3 / 2, "chunk arenas hold %d bytes for %d of rows", capacity, data)
 }
 
+
+// kernel_scan_into releases the snapshot it scanned before returning, and a
+// concurrent commit can then free that snapshot's chunks: the rows it returns
+// are copies taken while the snapshot was held.
+@(test)
+test_kernel_scan_into_rows_outlive_the_snapshot :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	kernel: Kernel
+	kernel_init(&kernel)
+	defer kernel_destroy(&kernel)
+	note := create_relation(&kernel, 1, "Note", 2)
+	tx := kernel_begin(&kernel)
+	transaction_assert(&tx, note, tuple_of(must_int(1), v.value_string(context.temp_allocator, "scanned-text")))
+	commit_transaction(t, &tx)
+
+	block, _ := snapshot_relation_block(kernel.current, note)
+	stored, _ := v.value_as_string(v.tuple_values(relation_block_row(block, 0))[1])
+	rows: [dynamic]v.Tuple
+	defer delete(rows)
+	kernel_scan_into(&kernel, note, []v.Binding{{}, {}}, &rows)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) != 1 {
+		return
+	}
+	scanned, _ := v.value_as_string(v.tuple_values(rows[0])[1])
+	testing.expect(t, scanned == "scanned-text")
+	testing.expect(t, raw_data(scanned) != raw_data(stored))
+}

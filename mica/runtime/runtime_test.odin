@@ -7383,3 +7383,57 @@ end
 		testing.expectf(t, raw_data(got) != raw_data(stored), "%s returned the stored row's bytes, not a copy", verb)
 	}
 }
+
+// Subscription messages sit in a mailbox until the receiver runs, after the
+// snapshot their rows came from may be gone (and its chunks freed): scanned
+// rows are copies taken while the snapshot is held, and message values own
+// their strings.
+@(test)
+test_run_subscription_rows_are_owned :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	source := `make_relation(:Note, 2)
+assert Note(5, "note-text")
+`
+	path, path_ok := write_temp_source(t, "mica_subscription_owned_test.mica", source)
+	if !path_ok {
+		return
+	}
+	defer os.remove(path)
+	kernel: k.Kernel
+	k.kernel_init(&kernel)
+	defer k.kernel_destroy(&kernel)
+	world, start := world_start(&kernel, []string{path}, context.temp_allocator)
+	testing.expectf(t, start.ok, "load failed: %s", start.message)
+	if !start.ok {
+		return
+	}
+	defer world_destroy(world)
+	_ = world_wait(world, world.entry)
+
+	snapshot := k.kernel_snapshot(&kernel)
+	defer k.snapshot_release(snapshot)
+	note, _ := k.snapshot_relation_metadata_named(snapshot, v.symbol_intern("Note"))
+	block, has_block := k.snapshot_relation_block(snapshot, note.id)
+	testing.expect(t, has_block)
+	if !has_block {
+		return
+	}
+	stored_row := v.tuple_values(k.relation_block_row(block, 0))
+	stored, _ := v.value_as_string(stored_row[1])
+
+	rows := subscription_scan_rows(&world.env, .Facts, note.id, []v.Binding{{}, {}})
+	defer delete(rows)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) != 1 {
+		return
+	}
+	scanned, _ := v.value_as_string(v.tuple_values(rows[0])[1])
+	testing.expect(t, scanned == "note-text")
+	testing.expect(t, raw_data(scanned) != raw_data(stored))
+
+	message := subscription_row_value(&world.env, rows[0])
+	items, _ := v.value_as_list(message)
+	text, _ := v.value_as_string(items[1])
+	testing.expect(t, text == "note-text")
+	testing.expect(t, raw_data(text) != raw_data(scanned))
+}

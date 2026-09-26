@@ -1177,12 +1177,19 @@ kernel_scan_into :: proc(
 	current := kernel_snapshot(kernel)
 	defer snapshot_release(current)
 
+	start := len(out)
 	relation_source_scan_into(
 		&Relation_Source{kernel = kernel, snapshot = current, use_stored_derived = true},
 		relation,
 		bindings,
 		out,
 	)
+	// The rows point into `current`'s chunks, which a concurrent commit can
+	// free once it is released on return: hand back copies (in the temporary
+	// allocator; callers copy whatever they keep).
+	for &row in out[start:] {
+		row = v.tuple_deep_copy(context.temp_allocator, row)
+	}
 }
 
 // Reports whether a relation tuple is visible in the current snapshot.
