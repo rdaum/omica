@@ -105,7 +105,8 @@ World :: struct {
 	ctx:               c.Compile_Context,
 	env:               Builtin_Env,
 	scheduler:         Scheduler,
-	program:           ^vm.Program,
+	program:           ^vm.Program, // Bootstrap image, retained for legacy references.
+	programs:          vm.Program_Registry,
 	// Final expanded source text. Compile-context keys are views into it.
 	sources:           [dynamic]string,
 	// Attached durable store. Owned by the world.
@@ -139,6 +140,7 @@ world_start :: proc(
 	world := new(World, allocator)
 	world.allocator = allocator
 	world.kernel = kernel
+	vm.program_registry_init(&world.programs, allocator)
 	world.sources = make([dynamic]string, allocator)
 
 	if config.store_path != "" {
@@ -217,9 +219,7 @@ world_destroy :: proc(world: ^World) {
 		world.store = nil
 	}
 	subscriptions_destroy(&world.env.subscriptions)
-	if world.program != nil {
-		vm.program_destroy(world.program, world.allocator)
-	}
+	vm.program_registry_destroy(&world.programs)
 	for source in world.sources {
 		delete(source, world.allocator)
 	}
@@ -351,12 +351,9 @@ world_value_literal :: proc(
 	return result
 }
 
-// Compiles `source` against the live world and runs it as a task. Used by the
-// CLI to evaluate expressions against a stored world without reloading its
-// sources. The stored sources are recompiled with their top-level expressions
-// removed so verb function indices match the persisted MethodProgram facts,
-// then the eval source is appended as the program's entry. The outcome borrows
-// world-allocator values.
+// Compiles only `source` against the live catalogue. Calls into installed
+// definitions resolve through their program references. Returned values have
+// world lifetime, including callable handles that pin their defining image.
 world_eval :: proc(world: ^World, source: string, allocator := context.allocator) -> Task_Outcome {
 	id, failure, submitted := world_eval_submit(world, source, allocator)
 	if !submitted {
@@ -379,53 +376,18 @@ world_eval_submit :: proc(
 	Task_Outcome,
 	bool,
 ) {
-	ast, parse_errors := c.parse_program(source, allocator)
-	if len(parse_errors) > 0 {
-		return 0, Task_Outcome{kind = .Aborted, message = parse_errors[0].message}, false
-	}
-	items: [dynamic]c.Item
-	defer delete(items)
-	for unit_source in world.sources {
-		unit_ast, unit_errors := c.parse_program(unit_source, context.temp_allocator)
-		if len(unit_errors) > 0 {
-			return 0, Task_Outcome{kind = .Aborted, message = unit_errors[0].message}, false
-		}
-		for item in unit_ast.items {
-			if _, is_expression := item.(c.Expr_Item); is_expression {
-				continue
-			}
-			append(&items, item)
-		}
-	}
-	for item in ast.items {
-		append(&items, item)
-	}
-	program_ast := c.Program_AST {
-		items = items[:],
-	}
-	// Compilation observes one committed catalogue, without mutating maps
-	// shared with running tasks. Staged creations remain private to their task.
-	catalog := k.kernel_snapshot(world.kernel)
-	defer k.snapshot_release(catalog)
-	compile_ctx := world.ctx
-	compile_ctx.relations = make(map[string]u32, allocator)
-	defer delete(compile_ctx.relations)
-	for metadata in catalog.catalog {
-		if metadata.tombstoned || metadata.storage != .Tuple {continue}
-		name, ok := v.symbol_name(metadata.name)
-		if ok {compile_ctx.relations[name] = u32(metadata.id)}
-	}
-	compiled := c.compile_program(&program_ast, &compile_ctx, allocator)
-	if len(compiled.errors) > 0 {
-		return 0, Task_Outcome{kind = .Aborted, message = compiled.errors[0].message}, false
-	}
+	tx := k.kernel_begin(world.kernel)
+	defer k.transaction_destroy(&tx)
+	program, message := runtime_compile(world, &tx, source, !world.env.enforce_authority)
+	if program == nil {return 0, Task_Outcome{kind = .Aborted, message = message}, false}
+	defer vm.program_release(program)
+
 	task := new(Task, allocator)
-	task_init(task, 0, world.kernel, compiled.program, &world.env, allocator)
-	id := scheduler_submit_owned(&world.scheduler, task)
+	task_init(task, 0, world.kernel, program, &world.env, allocator)
+	id := scheduler_submit(&world.scheduler, task)
 	if id == 0 {
 		task_destroy(task)
 		free(task, allocator)
-		vm.program_destroy(compiled.program, allocator)
 		return 0, Task_Outcome{kind = .Aborted, message = "cannot submit eval task"}, false
 	}
 	return id, {}, true
@@ -619,6 +581,7 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 
 	world.env = Builtin_Env {
 		kernel       = world.kernel,
+		world        = world,
 		ctx          = &world.ctx,
 		fields       = make(map[string]Field_Info, allocator),
 		unit_sources = make(map[string]string, allocator),
@@ -647,13 +610,10 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 
 	declarations := Declarations {
 		next_relation = 1,
-		next_identity = 0x1000,
 		next_rule     = 1,
 	}
-	endpoint_identity, endpoint_ok := v.value_identity_raw(declarations.next_identity)
-	declarations.next_identity += 1
-	actor_identity, actor_ok := v.value_identity_raw(declarations.next_identity)
-	declarations.next_identity += 1
+	endpoint_identity, endpoint_ok := k.kernel_reserve_identity(world.kernel)
+	actor_identity, actor_ok := k.kernel_reserve_identity(world.kernel)
 	if endpoint_ok && actor_ok {
 		world.env.endpoint = endpoint_identity
 		world.env.actor = actor_identity
@@ -675,11 +635,6 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 	if !computed_result.ok {
 		return computed_result
 	}
-	identity_result := assert_named_identities(&world.env, declarations.named_identities[:])
-	if !identity_result.ok {
-		return identity_result
-	}
-	delete(declarations.named_identities)
 	unit_result := assert_unit_sources(&world.env, unit_facts[:])
 	if !unit_result.ok {
 		return unit_result
@@ -711,10 +666,6 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 		}
 	}
 
-	method_result := install_methods(&world.env, asts[:], world.sources[:], &declarations)
-	if !method_result.ok {
-		return method_result
-	}
 
 	items := make([dynamic]c.Item, allocator)
 	defer delete(items)
@@ -736,7 +687,28 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 		}
 		return Run_Result{ok = false, message = compiled.errors[0].message}
 	}
-	world.program = compiled.program
+	bytes: [dynamic]u8
+	defer delete(bytes)
+	if vm.program_to_bytes(compiled.program, &bytes) !=
+	   .None {return Run_Result{message = "cannot encode program"}}
+	artifact, _ := vm.program_artifact_id(bytes[:])
+	world.program = vm.program_registry_add(
+		&world.programs,
+		compiled.program,
+		artifact,
+		allocator,
+		true,
+	)
+	method_result := install_methods(
+		&world.env,
+		asts[:],
+		world.sources[:],
+		&declarations,
+		artifact,
+	)
+	if !method_result.ok {
+		return method_result
+	}
 
 	program_bytes_result := assert_program_bytes(&world.env, world.program)
 	if !program_bytes_result.ok {
@@ -804,6 +776,7 @@ world_boot :: proc(world: ^World, store: ^s.Store, config: World_Config) -> Run_
 	install_primitive_identities(&world.ctx)
 	world.env = Builtin_Env {
 		kernel       = world.kernel,
+		world        = world,
 		ctx          = &world.ctx,
 		fields       = make(map[string]Field_Info, allocator),
 		unit_sources = make(map[string]string, allocator),
@@ -882,10 +855,11 @@ world_boot :: proc(world: ^World, store: ^s.Store, config: World_Config) -> Run_
 	}
 
 	// Runtime context identities: allocate above every stored identity.
-	next_identity := max_stored_identity(world.kernel) + 1
-	endpoint_identity, endpoint_ok := v.value_identity_raw(next_identity)
-	next_identity += 1
-	actor_identity, actor_ok := v.value_identity_raw(next_identity)
+	endpoint_identity, endpoint_ok := k.kernel_reserve_identity(
+		world.kernel,
+		max_stored_identity(world.kernel),
+	)
+	actor_identity, actor_ok := k.kernel_reserve_identity(world.kernel)
 	if endpoint_ok && actor_ok {
 		world.env.endpoint = endpoint_identity
 		world.env.actor = actor_identity
@@ -994,47 +968,35 @@ world_boot_program :: proc(world: ^World, store: ^s.Store) -> Run_Result {
 		if len(compiled.errors) > 0 {
 			return Run_Result{ok = false, message = compiled.errors[0].message}
 		}
-		world.program = compiled.program
-		return assert_program_bytes(&world.env, world.program)
+		bytes: [dynamic]u8
+		defer delete(bytes)
+		if vm.program_to_bytes(compiled.program, &bytes) !=
+		   .None {return Run_Result{message = "cannot encode legacy program"}}
+		artifact, _ := vm.program_artifact_id(bytes[:])
+		world.program = vm.program_registry_add(
+			&world.programs,
+			compiled.program,
+			artifact,
+			allocator,
+			true,
+		)
+		if result := assert_program_bytes(&world.env, world.program); !result.ok {return result}
+		return world_upgrade_program_references(world)
 	}
-	if len(rows) > 1 {
-		return Run_Result {
-			ok = false,
-			message = fmt.aprintf(
-				"multiple program artifacts: expected one, found %d",
-				len(rows),
-				allocator = allocator,
-			),
-		}
+	source := k.Relation_Source {
+		kernel = world.kernel,
 	}
-	artifact, artifact_ok := v.value_as_bytes(v.tuple_values(rows[0])[1])
-	if !artifact_ok {
-		return Run_Result{ok = false, message = "program artifact is not bytes"}
+	snapshot := k.kernel_snapshot(world.kernel)
+	defer k.snapshot_release(snapshot)
+	source.snapshot = snapshot
+	for row in rows {
+		artifact := v.tuple_values(row)[0]
+		program := vm.program_registry_resolve(&world.programs, &source, artifact)
+		if program == nil {return Run_Result{message = "cannot decode program artifact"}}
+		program.installed = true
+		if world.program == nil {world.program = program} else {vm.program_release(program)}
 	}
-	program, decode_error := vm.program_from_bytes(artifact, allocator)
-	if decode_error != .None {
-		return Run_Result {
-			ok = false,
-			message = fmt.aprintf(
-				"cannot decode program artifact: %v",
-				decode_error,
-				allocator = allocator,
-			),
-		}
-	}
-	if validation := vm.program_validate(program); validation != .None {
-		vm.program_destroy(program, allocator)
-		return Run_Result {
-			ok = false,
-			message = fmt.aprintf(
-				"program artifact failed validation: %v",
-				validation,
-				allocator = allocator,
-			),
-		}
-	}
-	world.program = program
-	return Run_Result{ok = true, message = "loaded"}
+	return world_upgrade_program_references(world)
 }
 
 // Reinstalls rule definitions from the durable Rule/RuleSource/ActiveRule
@@ -1168,6 +1130,56 @@ max_stored_identity :: proc(kernel: ^k.Kernel) -> u64 {
 		if identity, is_identity := v.value_as_identity(v.tuple_values(row)[0]); is_identity {
 			maximum = max(maximum, v.identity_raw(identity))
 		}
+	}
+	// Destroying a name does not erase references held in other columns or
+	// nested values. Include those allocated identities in the recovery floor.
+	snapshot := k.kernel_snapshot(kernel)
+	defer k.snapshot_release(snapshot)
+	source := k.Relation_Source {
+		snapshot = snapshot,
+	}
+	for metadata in snapshot.catalog {
+		if metadata.tombstoned || metadata.storage != .Tuple {continue}
+		clear(&rows)
+		k.relation_source_scan_into(
+			&source,
+			metadata.id,
+			make([]v.Binding, metadata.arity, context.temp_allocator),
+			&rows,
+		)
+		for row in rows {
+			for value in v.tuple_values(row) {maximum = max(maximum, max_allocated_identity(value))}
+		}
+	}
+	return maximum
+}
+
+@(private)
+max_allocated_identity :: proc(value: v.Value) -> u64 {
+	maximum := u64(0)
+	#partial switch v.value_kind(value) {
+	case .Identity:
+		identity, _ := v.value_as_identity(value)
+		raw := v.identity_raw(identity)
+		if raw >= 0x0002_0000_0000_0000 && raw < 0x0004_0000_0000_0000 {return raw}
+	case .List:
+		items, _ := v.value_as_list(value)
+		for item in items {maximum = max(maximum, max_allocated_identity(item))}
+	case .Map:
+		items, _ := v.value_as_map(value)
+		for item in items {maximum = max(maximum, max_allocated_identity(item.key), max_allocated_identity(item.value))}
+	case .Frob:
+		frob, _ := v.value_as_frob(value)
+		maximum = max(
+			max_allocated_identity(v.value_identity(frob.delegate)),
+			max_allocated_identity(frob.value),
+		)
+	case .Error:
+		error, _ := v.value_as_error(value)
+		if error.has_value {maximum = max_allocated_identity(error.value)}
+	case .Relation:
+		relation, _ := v.value_as_relation(value)
+		for row in relation.rows {for cell in v.tuple_values(row) {maximum = max(maximum, max_allocated_identity(cell))}}
 	}
 	return maximum
 }

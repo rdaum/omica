@@ -1176,8 +1176,11 @@ test_vm_unwind_shrinks_registers :: proc(t: ^testing.T) {
 	defer vm_destroy(&state)
 
 	// A live handler frame plus a dead child frame with registers above it.
-	append(&state.frames, Frame{function = 0, ip = 0, register_base = 0})
-	append(&state.frames, Frame{function = 1, ip = 0, register_base = 8, caller_base = 0})
+	append(&state.frames, Frame{program = program, function = 0, ip = 0, register_base = 0})
+	append(
+		&state.frames,
+		Frame{program = program, function = 1, ip = 0, register_base = 8},
+	)
 	resize(&state.registers, 16)
 	append(&state.handlers, Handler{frame = 0, target = 0, error_register = -1, kind = .Catch})
 

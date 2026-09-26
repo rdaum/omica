@@ -1,6 +1,7 @@
 package mica_runtime
 
 import "core:fmt"
+import "core:mem/virtual"
 import "core:os"
 import "core:testing"
 import k "../kernel"
@@ -23,9 +24,22 @@ relation_test_world :: proc(t: ^testing.T, kernel: ^k.Kernel, source, suffix: st
 }
 
 @(private)
-expect_relation_eval :: proc(t: ^testing.T, world: ^World, source: string, success := true) -> Task_Outcome {
+expect_relation_eval :: proc(
+	t: ^testing.T,
+	world: ^World,
+	source: string,
+	success := true,
+) -> Task_Outcome {
 	outcome := world_eval(world, source, context.temp_allocator)
-	testing.expectf(t, (outcome.kind == .Complete) == success, "eval: %s\noutcome: %v %s", source, outcome.kind, outcome.message)
+	testing.expectf(
+		t,
+		(outcome.kind == .Complete) == success,
+		"eval: %s\noutcome: %v %s %s",
+		source,
+		outcome.kind,
+		outcome.message,
+		v.value_to_string(outcome.error, context.temp_allocator),
+	)
 	return outcome
 }
 
@@ -301,6 +315,12 @@ return make_functional_relation(:Persistent, 2, [0])`)
 
 @(test)
 test_relation_constructor_multiple_workers :: proc(t: ^testing.T) {
+	// The world allocator is shared by workers. The default temporary arena
+	// is not thread-safe; give this concurrent test a locked arena instead.
+	arena: virtual.Arena
+	if !testing.expect(t, virtual.arena_init_growing(&arena) == nil) {return}
+	defer virtual.arena_destroy(&arena)
+	context.temp_allocator = virtual.arena_allocator(&arena)
 	defer free_all(context.temp_allocator)
 	kernel: k.Kernel
 	k.kernel_init(&kernel)

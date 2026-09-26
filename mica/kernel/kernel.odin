@@ -89,6 +89,8 @@ Kernel :: struct {
 	// Reservations are never reused, so an aborted transaction merely leaves a
 	// gap, which is preferable to two concurrent creators colliding.
 	staged_id_high:       u32,
+	// Shared by filein, runtime constructors, and method installation.
+	identity_high:        u64,
 
 	// Bounded window of committed fact changes for subscriptions.
 	changes:              Change_Feed,
@@ -718,7 +720,9 @@ kernel_publish_group :: proc(kernel: ^Kernel, batch: []^Commit_Entry) {
 				// them too, so two entries in one group cannot claim the same name.
 				for accepted in publishable {
 					for other in accepted.transaction.catalog_changes {
-						if other.kind == .Create && (other.metadata.name == change.metadata.name || other.metadata.id == change.metadata.id) {
+						if other.kind == .Create &&
+						   (other.metadata.name == change.metadata.name ||
+								   other.metadata.id == change.metadata.id) {
 							collides = true
 							break
 						}
@@ -767,6 +771,11 @@ kernel_publish_group :: proc(kernel: ^Kernel, batch: []^Commit_Entry) {
 					snapshot_set_buffer(merged, block)
 				}
 			}
+			for definition in entry.transaction.rule_additions {
+				for owned in entry.candidate.rules {
+					if owned.id == definition.id {snapshot_add_rule(merged, owned); break}
+				}
+			}
 			// Apply only this transaction's catalogue changes. Like blocks, a
 			// candidate's full catalogue also contains stale copies of every
 			// entry it did not change.
@@ -788,6 +797,16 @@ kernel_publish_group :: proc(kernel: ^Kernel, batch: []^Commit_Entry) {
 						}
 					}
 				}
+			}
+		}
+		has_new_rules := false
+		for entry in publishable {if len(entry.transaction.rule_additions) > 0 {has_new_rules = true; break}}
+		if has_new_rules {
+			active := snapshot_active_rules(merged, context.temp_allocator)
+			if _, valid := rules_stratify(active, context.temp_allocator); !valid {
+				snapshot_release(merged)
+				snapshot_release(base)
+				return
 			}
 		}
 		kernel_compute_derived(kernel, merged)
@@ -1200,4 +1219,16 @@ kernel_contains :: proc(kernel: ^Kernel, relation: Relation_ID, tuple: v.Tuple) 
 	current := kernel_snapshot(kernel)
 	defer snapshot_release(current)
 	return snapshot_contains(current, relation, tuple)
+}
+
+// Reserve an identity above the caller's recovery floor. Aborts leave gaps.
+// This range is above relation IDs and their derived index identities.
+kernel_reserve_identity :: proc(kernel: ^Kernel, floor: u64 = 0) -> (v.Value, bool) {
+	for {
+		previous := sync.atomic_load(&kernel.identity_high)
+		next := max(previous + 1, max(floor + 1, u64(0x0002_0000_0000_0000)))
+		if next >= u64(0x0004_0000_0000_0000) {return {}, false}
+		_, exchanged := sync.atomic_compare_exchange_strong(&kernel.identity_high, previous, next)
+		if exchanged {return v.value_identity_raw(next)}
+	}
 }

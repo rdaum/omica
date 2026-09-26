@@ -10,13 +10,16 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:time"
-
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import v "../../mica/var"
 import vm "../../mica/vm"
 
-COMPILER :: []string{"apps/compiler/lex.mica", "apps/compiler/parse.mica", "apps/compiler/emit.mica"}
+COMPILER :: []string {
+	"apps/compiler/lex.mica",
+	"apps/compiler/parse.mica",
+	"apps/compiler/emit.mica",
+}
 
 main :: proc() {
 	iterations := 7
@@ -69,8 +72,8 @@ main :: proc() {
 		fmt.eprintln("decode:", decode_error)
 		os.exit(1)
 	}
-	vm.program_destroy(world.program, world.allocator)
-	world.program = program
+	replaced := r.world_replace_program(world, program, context.allocator)
+	assert(replaced.ok, replaced.message)
 
 	fmt.println("\n-- mica-emitted compiler --")
 	time_verb(world, "lex", target, iterations)

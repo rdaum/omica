@@ -61,10 +61,10 @@ VM_Builtin :: struct {
 }
 
 Frame :: struct {
+	program:       ^Program,
 	function:      int,
 	ip:            int,
 	register_base: int,
-	caller_base:   int,
 	caller_dst:    i32,
 }
 
@@ -101,6 +101,10 @@ Pending_Raise :: struct {
 }
 
 VM :: struct {
+	registry:                     ^Program_Registry,
+	initial_program:              ^Program,
+	program_pins:                 [dynamic]^Program,
+	builtin_tables:               map[^Program][]int,
 	program:                      ^Program,
 	allocator:                    mem.Allocator,
 	registers:                    [dynamic]v.Value,
@@ -182,6 +186,9 @@ VM :: struct {
 
 vm_init :: proc(state: ^VM, program: ^Program, allocator := context.allocator) {
 	state.program = program
+	state.initial_program = program
+	state.registry = program.registry
+	vm_pin_program(state, program)
 	state.allocator = allocator
 	state.registers = make([dynamic]v.Value)
 	state.frames = make([dynamic]Frame)
@@ -216,6 +223,7 @@ vm_init :: proc(state: ^VM, program: ^Program, allocator := context.allocator) {
 // returns immediately on a halted or failed VM, and re-initializing the VM
 // instead allocates several dynamic arrays and a fresh arena per iteration.
 vm_reset :: proc(state: ^VM) {
+	vm_select_program(state, state.initial_program)
 	clear(&state.registers)
 	clear(&state.frames)
 	clear(&state.handlers)
@@ -254,7 +262,10 @@ vm_destroy :: proc(state: ^VM) {
 		free(state.scratch, state.allocator)
 		state.scratch = nil
 	}
-	delete(state.builtin_index, state.allocator)
+	for _, table in state.builtin_tables {delete(table, state.allocator)}
+	delete(state.builtin_tables)
+	for program in state.program_pins {program_release(program)}
+	delete(state.program_pins)
 	state.builtin_index = nil
 }
 
@@ -317,6 +328,8 @@ vm_zero_locals :: #force_inline proc(
 
 @(private)
 vm_frames_push :: #force_inline proc(state: ^VM, frame: Frame) {
+	frame := frame
+	if frame.program == nil {frame.program = state.program}
 	if len(state.frames) >= cap(state.frames) {
 		reserve(&state.frames, max(8, len(state.frames) * 2))
 	}
@@ -434,6 +447,11 @@ vm_frame_base :: proc(state: ^VM) -> int {
 
 // Registers a builtin procedure under `name`. Returns its index.
 vm_register_builtin :: proc(state: ^VM, name: v.Symbol, argc: int, run: Builtin_Proc) -> int {
+	// A host may register another builtin after a program has already run.
+	// Rebuild every image's lookup table on its next use.
+	for _, table in state.builtin_tables {delete(table, state.allocator)}
+	clear(&state.builtin_tables)
+	state.builtin_index = nil
 	append(&state.builtins, VM_Builtin{name = name, argc = argc, run = run})
 	return len(state.builtins) - 1
 }
@@ -442,8 +460,10 @@ vm_register_builtin :: proc(state: ^VM, name: v.Symbol, argc: int, run: Builtin_
 // calls then index directly instead of scanning the registration list. Call
 // after all builtins are registered; vm_builtin_call also calls it lazily.
 vm_resolve_builtins :: proc(state: ^VM) {
-	delete(state.builtin_index, state.allocator)
 	program := state.program
+	if table, exists := state.builtin_tables[program]; exists {state.builtin_index = table; return}
+	if state.builtin_tables ==
+	   nil {state.builtin_tables = make(map[^Program][]int, state.allocator)}
 	if program == nil || len(program.builtins) == 0 {
 		state.builtin_index = nil
 		return
@@ -459,6 +479,7 @@ vm_resolve_builtins :: proc(state: ^VM) {
 		}
 	}
 	state.builtin_index = table
+	state.builtin_tables[program] = table
 }
 
 // Sets the relation read source and write transaction for relation
@@ -512,7 +533,6 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				function = entry,
 				ip = entry_function.code_offset,
 				register_base = 0,
-				caller_base = 0,
 				caller_dst = -1,
 			},
 		)
@@ -786,7 +806,6 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 					function = int(instr.b),
 					ip = callee.code_offset,
 					register_base = callee_base,
-					caller_base = base,
 					caller_dst = instr.a,
 				},
 			)
@@ -817,6 +836,10 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				return .Halted
 			}
 			caller := state.frames[len(state.frames) - 1]
+			if caller.program != program {
+				vm_select_program(state, caller.program)
+				program = caller.program
+			}
 			state.registers[caller.register_base + int(returned.caller_dst)] = value
 
 		case .Build_List:
@@ -1065,15 +1088,20 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				vm_fail(state, "E_VM_FAULT", "self function needs a capture slot")
 				break
 			}
-			captures := make([]v.Value, capture_count, state.allocator)
+			capture_allocator := state.allocator
+			if program.registry != nil {capture_allocator = program.storage_allocator}
+			captures := make([]v.Value, capture_count, capture_allocator)
 			for index in 0 ..< capture_count {
-				captures[index] = state.registers[base + int(instr.c) + index]
+				captures[index] = v.value_deep_copy(
+					capture_allocator,
+					state.registers[base + int(instr.c) + index],
+				)
 			}
 			captures[capture_count - 1] = v.Value(0)
 			sync.mutex_lock(&program.callables_mutex)
 			callable_id := i32(len(program.callables))
 			append(&program.callables, Callable_Info{function = instr.b, captures = captures})
-			value, value_ok := v.value_function_raw(u64(callable_id))
+			value, value_ok := vm_callable_value(program, u64(callable_id))
 			if value_ok {
 				program.callables[int(callable_id)].captures[capture_count - 1] = value
 			}
@@ -1090,12 +1118,17 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				break
 			}
 			capture_count := int(instr.flags)
-			captures := make([]v.Value, capture_count, state.allocator)
+			capture_allocator := state.allocator
+			if program.registry != nil {capture_allocator = program.storage_allocator}
+			captures := make([]v.Value, capture_count, capture_allocator)
 			for index in 0 ..< capture_count {
-				captures[index] = state.registers[base + int(instr.c) + index]
+				captures[index] = v.value_deep_copy(
+					capture_allocator,
+					state.registers[base + int(instr.c) + index],
+				)
 			}
 			callable_id := vm_intern_callable(state, instr.b, captures)
-			function, function_ok := v.value_function_raw(u64(callable_id))
+			function, function_ok := vm_callable_value(program, u64(callable_id))
 			if !function_ok {
 				vm_fail(state, "E_TYPE", "callable index is out of range")
 				break
@@ -1117,6 +1150,7 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				vm_fail(state, "E_DISPATCH", "callable index is invalid")
 				break
 			}
+			program = state.program
 			function_index := int(callable.function)
 			if function_index < 0 || function_index >= len(program.functions) {
 				vm_fail(state, "E_DISPATCH", "function index is invalid")
@@ -1145,7 +1179,6 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 					function = function_index,
 					ip = callee.code_offset,
 					register_base = callee_base,
-					caller_base = base,
 					caller_dst = instr.a,
 				},
 			)
@@ -1176,7 +1209,6 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 					function = int(instr.b),
 					ip = callee.code_offset,
 					register_base = callee_base,
-					caller_base = base,
 					caller_dst = instr.a,
 				},
 			)
@@ -1230,6 +1262,7 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				vm_fail(state, "E_DISPATCH", "callable index is invalid")
 				break
 			}
+			program = state.program
 			function_index := int(callable.function)
 			if function_index < 0 || function_index >= len(program.functions) {
 				vm_fail(state, "E_DISPATCH", "function index is invalid")
@@ -1257,7 +1290,6 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 					function = function_index,
 					ip = callee.code_offset,
 					register_base = callee_base,
-					caller_base = base,
 					caller_dst = instr.a,
 				},
 			)
@@ -1302,6 +1334,10 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 					return .Halted
 				}
 				caller := state.frames[len(state.frames) - 1]
+				if caller.program != program {
+					vm_select_program(state, caller.program)
+					program = caller.program
+				}
 				state.registers[caller.register_base + int(returned.caller_dst)] = pending.value
 			}
 
@@ -1318,20 +1354,24 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 			if !vm_dispatch(state, base, instr) {
 				break
 			}
+			program = state.program
 
 		case .Dynamic_Dispatch:
 			if !vm_dynamic_dispatch(state, base, instr) {
 				break
 			}
+			program = state.program
 
 		case .Positional_Dispatch:
 			if !vm_positional_dispatch(state, base, instr) {
 				break
 			}
+			program = state.program
 		}
 
 		if state.status == .Failed {
 			if vm_unwind(state) {
+				program = state.program
 				continue
 			}
 			return .Failed
@@ -1430,6 +1470,7 @@ vm_unwind :: proc(state: ^VM) -> bool {
 	}
 	vm_frames_close(state, handler.frame + 1)
 	frame := state.frames[handler.frame]
+	vm_select_program(state, frame.program)
 	state.frames[handler.frame].ip = int(handler.target)
 	// Drop the dead frames' registers, mirroring Return: only the handler
 	// frame's window stays live. Without this, errors caught in a loop grow
@@ -2080,11 +2121,25 @@ vm_call_dispatch_entry :: proc(
 		vm_fail(state, "E_DISPATCH", "method has no program")
 		return false
 	}
-	function_index, is_int := v.value_as_int(program_value)
-	if !is_int || function_index < 0 || int(function_index) >= len(program.functions) {
-		vm_fail(state, "E_DISPATCH", "method program index is invalid")
-		return false
+	if reference, ok := v.value_as_list(program_value); ok && len(reference) == 2 {
+		if index, valid := v.value_as_int(reference[1]); valid && index >= 0 {
+			for pinned in state.program_pins {
+				if pinned.artifact == reference[0] && index < i64(len(pinned.functions)) {
+					vm_select_program(state, pinned)
+					return vm_call_function(state, base, destination, int(index), nil, args)
+				}
+			}
+		}
 	}
+	target, function_index, valid := program_resolve_reference(
+		state.registry,
+		state.source,
+		state.initial_program,
+		program_value,
+	)
+	if !valid {vm_fail(state, "E_DISPATCH", "method program reference is invalid"); return false}
+	defer program_release(target)
+	vm_select_program(state, target)
 	return vm_call_function(state, base, destination, int(function_index), nil, args)
 }
 
@@ -2121,7 +2176,6 @@ vm_call_function :: proc(
 			function = function_index,
 			ip = callee.code_offset,
 			register_base = callee_base,
-			caller_base = base,
 			caller_dst = destination,
 		},
 	)
@@ -2619,7 +2673,20 @@ vm_builtin_allowed :: proc(state: ^VM, name: v.Symbol) -> bool {
 @(private)
 vm_resolve_callable :: proc(state: ^VM, id: v.Function_ID) -> (Callable_Info, bool) {
 	program := state.program
-	index := int(v.function_id_raw(id))
+	raw := v.function_id_raw(id)
+	serial := raw >> 32
+	if serial != program.serial {
+		if state.registry == nil {return {}, false}
+		sync.mutex_lock(&state.registry.lock)
+		target, found := state.registry.serials[serial]
+		if found {target.references += 1}
+		sync.mutex_unlock(&state.registry.lock)
+		if !found {return {}, false}
+		vm_select_program(state, target)
+		program_release(target)
+		program = target
+	}
+	index := int(raw & 0xffff_ffff)
 	sync.mutex_lock(&program.callables_mutex)
 	defer sync.mutex_unlock(&program.callables_mutex)
 	if index < 0 || index >= len(program.callables) {
@@ -2647,7 +2714,10 @@ vm_intern_callable :: proc(state: ^VM, function: i32, captures: []v.Value) -> i3
 			}
 		}
 		if matches {
-			delete(captures)
+			allocator := state.allocator
+			if program.registry != nil {allocator = program.storage_allocator}
+			for capture in captures {v.value_deep_free(allocator, capture)}
+			delete(captures, allocator)
 			return i32(index)
 		}
 	}

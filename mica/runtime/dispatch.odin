@@ -64,100 +64,22 @@ install_methods :: proc(
 	asts: []^c.Program_AST,
 	sources: []string,
 	declarations: ^Declarations,
+	artifact: v.Value = {},
 ) -> Run_Result {
 	tx := k.kernel_begin(env.kernel)
 	defer k.transaction_destroy(&tx)
-	function_index := 1
-
-	for ast, ast_index in asts {
-		// Fallback for hand-built ASTs that carry no per-verb span.
-		unit_source := ""
-		if ast_index < len(sources) {
-			unit_source = strings.trim_space(sources[ast_index])
-		}
-		for item in ast.items {
-			verb, is_verb := item.(c.Verb_Item)
-			if !is_verb {
-				continue
-			}
-			// Record the verb's own text, not the whole unit: a unit source
-			// per method duplicates the file once per verb and the kernel
-			// deep-copies every copy on write.
-			source_text := verb.source
-			if source_text == "" {
-				source_text = unit_source
-			}
-			method_value, identity_ok := v.value_identity_raw(declarations.next_identity)
-			if !identity_ok {
-				return Run_Result{ok = false, message = "method identity space exhausted"}
-			}
-			declarations.next_identity += 1
-
-			selector := v.value_symbol(v.symbol_intern(verb.name))
-			if err := k.transaction_assert(
-				&tx,
-				k.DISPATCH_METHOD_SELECTOR_ID,
-				v.tuple_new(context.temp_allocator, []v.Value{method_value, selector}),
-			); err != k.Kernel_Error.None {
-				return method_install_error(env, verb.name, err)
-			}
-
-			program_value := value_int_must(i64(function_index))
-			if err := k.transaction_assert(
-				&tx,
-				k.DISPATCH_METHOD_PROGRAM_ID,
-				v.tuple_new(context.temp_allocator, []v.Value{method_value, program_value}),
-			); err != k.Kernel_Error.None {
-				return method_install_error(env, verb.name, err)
-			}
-
-			if source_text != "" {
-				if err := k.transaction_assert(
-					&tx,
-					k.SYSTEM_METHOD_SOURCE_ID,
-					v.tuple_new(context.temp_allocator, []v.Value {
-						method_value,
-						v.value_string(context.temp_allocator, source_text),
-					}),
-				); err != k.Kernel_Error.None {
-					return method_install_error(env, verb.name, err)
-				}
-			}
-
-			for param, position in verb.params {
-				restriction := method_restriction(env, param)
-				mode := k.PARAM_REQUIRED_MODE
-				switch param.mode {
-				case .Optional:
-					mode = k.PARAM_OPTIONAL_MODE
-				case .Rest:
-					mode = k.PARAM_REST_MODE
-				case .Required:
-				}
-				if err := k.transaction_assert(
-					&tx,
-					k.DISPATCH_PARAM_ID,
-					v.tuple_new(context.temp_allocator, []v.Value {
-						method_value,
-						v.value_symbol(v.symbol_intern(param.name)),
-						restriction,
-						value_int_must(i64(position) + i64(mode) * 65536),
-					}),
-				); err != k.Kernel_Error.None {
-					return method_install_error(env, verb.name, err)
-				}
-			}
-			function_index += 1
-		}
-	}
+	if result := stage_methods(env, &tx, asts, sources, artifact); !result.ok {return result}
 
 	committed, commit_err := k.transaction_commit(&tx)
 	if commit_err != k.Kernel_Error.None {
-		return Run_Result{ok = false, message = fmt.aprintf(
-			"method install commit failed: %v",
-			commit_err,
-			allocator = env.allocator,
-		)}
+		return Run_Result {
+			ok = false,
+			message = fmt.aprintf(
+				"method install commit failed: %v",
+				commit_err,
+				allocator = env.allocator,
+			),
+		}
 	}
 	k.snapshot_release(committed)
 	return Run_Result{ok = true, message = "loaded"}
@@ -201,4 +123,183 @@ method_restriction :: proc(env: ^Builtin_Env, param: c.Param) -> v.Value {
 	case:
 	}
 	return k.unrestricted_dispatch_restriction()
+}
+
+@(private)
+stage_methods :: proc(
+	env: ^Builtin_Env,
+	tx: ^k.Transaction,
+	asts: []^c.Program_AST,
+	sources: []string,
+	artifact: v.Value,
+	replace := false,
+) -> Run_Result {
+	function_index := 1
+
+	for ast, ast_index in asts {
+		// Fallback for hand-built ASTs that carry no per-verb span.
+		unit_source := ""
+		if ast_index < len(sources) {
+			unit_source = strings.trim_space(sources[ast_index])
+		}
+		for item in ast.items {
+			verb, is_verb := item.(c.Verb_Item)
+			if !is_verb {
+				continue
+			}
+			// Record the verb's own text, not the whole unit: a unit source
+			// per method duplicates the file once per verb and the kernel
+			// deep-copies every copy on write.
+			source_text := verb.source
+			if source_text == "" {
+				source_text = unit_source
+			}
+			method_value, identity_ok := k.kernel_reserve_identity(env.kernel)
+			if !identity_ok {
+				return Run_Result{ok = false, message = "method identity space exhausted"}
+			}
+
+			if replace {
+				if previous, found := matching_method(env, tx, verb); found {
+					method_value = previous
+					for relation in ([]k.Relation_ID{k.DISPATCH_METHOD_PROGRAM_ID, k.SYSTEM_METHOD_SOURCE_ID}) {
+						source := k.Relation_Source {
+							transaction = tx,
+						}
+						rows: [dynamic]v.Tuple
+						k.relation_source_scan_into(
+							&source,
+							relation,
+							[]v.Binding{v.binding_of(previous), {}},
+							&rows,
+						)
+						for row in rows {
+							if err := k.transaction_retract(tx, relation, row);
+							   err !=
+							   .None {delete(rows); return method_install_error(env, verb.name, err)}
+						}
+						delete(rows)
+					}
+				}
+			}
+			selector := v.value_symbol(v.symbol_intern(verb.name))
+			if err := k.transaction_assert(
+				tx,
+				k.DISPATCH_METHOD_SELECTOR_ID,
+				v.tuple_new(context.temp_allocator, []v.Value{method_value, selector}),
+			); err != k.Kernel_Error.None {
+				return method_install_error(env, verb.name, err)
+			}
+
+			program_value := v.value_list(
+				context.temp_allocator,
+				[]v.Value{artifact, value_int_must(i64(function_index))},
+			)
+			if err := k.transaction_assert(
+				tx,
+				k.DISPATCH_METHOD_PROGRAM_ID,
+				v.tuple_new(context.temp_allocator, []v.Value{method_value, program_value}),
+			); err != k.Kernel_Error.None {
+				return method_install_error(env, verb.name, err)
+			}
+
+			if source_text != "" {
+				if err := k.transaction_assert(
+					tx,
+					k.SYSTEM_METHOD_SOURCE_ID,
+					v.tuple_new(
+						context.temp_allocator,
+						[]v.Value {
+							method_value,
+							v.value_string(context.temp_allocator, source_text),
+						},
+					),
+				); err != k.Kernel_Error.None {
+					return method_install_error(env, verb.name, err)
+				}
+			}
+
+			for param, position in verb.params {
+				restriction := method_restriction(env, param)
+				mode := k.PARAM_REQUIRED_MODE
+				switch param.mode {
+				case .Optional:
+					mode = k.PARAM_OPTIONAL_MODE
+				case .Rest:
+					mode = k.PARAM_REST_MODE
+				case .Required:
+				}
+				if err := k.transaction_assert(
+					tx,
+					k.DISPATCH_PARAM_ID,
+					v.tuple_new(
+						context.temp_allocator,
+						[]v.Value {
+							method_value,
+							v.value_symbol(v.symbol_intern(param.name)),
+							restriction,
+							value_int_must(i64(position) + i64(mode) * 65536),
+						},
+					),
+				); err != k.Kernel_Error.None {
+					return method_install_error(env, verb.name, err)
+				}
+			}
+			function_index += 1
+		}
+	}
+
+	return Run_Result{ok = true}
+}
+
+// Match a definition by selector and ordered role signature. Replacing its
+// implementation preserves the method identity and existing invoke grants.
+@(private)
+matching_method :: proc(
+	env: ^Builtin_Env,
+	tx: ^k.Transaction,
+	verb: c.Verb_Item,
+) -> (
+	v.Value,
+	bool,
+) {
+	source := k.Relation_Source {
+		transaction = tx,
+	}
+	rows: [dynamic]v.Tuple
+	defer delete(rows)
+	k.relation_source_scan_into(
+		&source,
+		k.DISPATCH_METHOD_SELECTOR_ID,
+		[]v.Binding{{}, v.binding_of(v.value_symbol(v.symbol_intern(verb.name)))},
+		&rows,
+	)
+	for row in rows {
+		method := v.tuple_values(row)[0]
+		params: [dynamic]v.Tuple
+		k.relation_source_scan_into(
+			&source,
+			k.DISPATCH_PARAM_ID,
+			[]v.Binding{v.binding_of(method), {}, {}, {}},
+			&params,
+		)
+		matched := len(params) == len(verb.params)
+		for param, position in verb.params {
+			mode := k.PARAM_REQUIRED_MODE
+			if param.mode == .Optional {mode = k.PARAM_OPTIONAL_MODE}
+			if param.mode == .Rest {mode = k.PARAM_REST_MODE}
+			found := false
+			for candidate in params {
+				values := v.tuple_values(candidate)
+				if values[1] == v.value_symbol(v.symbol_intern(param.name)) &&
+				   values[2] == method_restriction(env, param) &&
+				   values[3] ==
+					   value_int_must(i64(position) + i64(mode) * 65536) {found = true; break}
+			}
+			if !found {matched = false; break}
+		}
+		delete(params)
+		if matched {return method, true}
+	}
+	return {}, false
 }
