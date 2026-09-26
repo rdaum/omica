@@ -298,16 +298,16 @@ mode-declaration = %s"@mode" "(" relation-mode ")"
 
 - Datomic, Inc., 2024. **Query (pull API).** https://docs.datomic.com/queries/pull.html — Immutable snapshot-based query model with backward-chaining on indexes; reference for snapshot consistency during concurrent queries.
 
-- Incremental-Maintenance RFC (rdaum/omica docs). — Defines Stages 1–9 of differential re-derivation (DRed) for eager relations; demand relations coexist with this layer.
+- omica `docs/incremental-maintenance-design.md`: a design for differential re-derivation of eager relations in stages; only stage 1 exists (rdaum/omica#125, in review). Demand relations coexist with it.
 
 ## Appendix: Relation to Rust mica
 
 | Behavior | Rust mica | omica today (Stage 2) | This RFC | Class |
 |----------|-----------|----------------------|----------|-------|
-| Forward-chain eager relations via differential dataflow | Implemented ([crates/runtime/src/subscription.rs:387-407](https://github.com/timbran-project/mica/blob/2bbceb0113b0/crates/runtime/src/subscription.rs#L387-L407)) | Implemented via DRed ([mica/kernel/rules.odin:1-100](https://github.com/rdaum/omica/blob/5a22a77cc245/mica/kernel/rules.odin#L1-L100)) | Retained for EAGER mode | Parity |
+| Maintain eager relations across commits | Lazy differential maintenance after first read ([crates/runtime/src/subscription.rs:387-407](https://github.com/timbran-project/mica/blob/2bbceb0113b0/crates/runtime/src/subscription.rs#L387-L407)) | Full fixpoint recompute on every commit; rdaum/omica#125 (stage 1, in review) shares blocks whose rows did not change; differential re-derivation is designed, not implemented | Unchanged; demand relations coexist with either | Gap (omica) |
 | Lazy materialization of demand relations | Not implemented | Not implemented | SLG-style tabling per snapshot | Improvement |
 | Recursive query support with completion tables | Not implemented | Not implemented | SLG completion for cycle detection | Improvement |
-| Persistence of derived tables | N/A (all eager, always persisted) | N/A (all eager, always persisted) | Never persist; recompute on boot | Divergence |
+| Persistence of derived tables | Not verified | Recomputed at boot, not persisted | Never persist demand tables; recompute on query | Parity for omica; Rust not verified |
 | Negation of eager relations | Supported (stratified) | Supported (stratified) | Supported | Parity |
 | Negation of demand relations | N/A (no demand) | N/A (no demand) | Rejected at install | Improvement |
 | Authority checks on queries | Implemented ([crates/vm/src/authority.rs](https://github.com/timbran-project/mica/blob/2bbceb0113b0/crates/vm/src/authority.rs)) | Implemented | Unchanged; applies to demand relations | Parity |

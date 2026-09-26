@@ -63,7 +63,7 @@ A mailbox is the per-endpoint message queue and volatile store. Tasks submit rep
 
 | Behavior | Rust | omica today | This RFC | Class |
 |----------|------|-------------|----------|-------|
-| **Wire protocol** | MHP1 frames (15 message types) | MSY1 only | Specify MSY1; note MHP1 as out-of-scope | Gap |
+| **Wire protocol** | MHP1 frames (15 message types) | MSY1 only | Specify MSY1; MHP1 is what an omica world needs to connect to Rust hosts | Gap |
 | **View sync envelope** | MSY1 (56-byte header, FNV-1a) | MSY1 implemented | Check byte parity against Rust's encoder | Parity |
 | **Session/actor mapping** | HTTP session → auth token → actor | HTTP cookie → actor | Document explicitly | Parity |
 | **Endpoint lifecycle** | OpenEndpoint, CloseEndpoint, EndpointClosed | Implicit in HTTP connection | Standardize close signaling | Gap |
@@ -104,7 +104,7 @@ Three capabilities unlock the multi-user live-world model:
 
 ## Alternatives Considered
 
-**Why MSY1 only, not full MHP1?** MHP1's 15 types and daemon-RPC are for polyglot federation; omica is single-process. Remote SubmitSource achieves code submission without the full daemon stack.
+**Why MSY1 only, not full MHP1?** omica's own hosts need only MSY1. MHP1 matters when an omica world should be served by Rust hosts; that interoperability is a separate decision. Porting a host or the editor into Rust does not depend on it.
 
 **Why Telnet before WebSocket?** WebSocket has higher overhead for sparse updates. Telnet is simpler to debug and fallback to.
 

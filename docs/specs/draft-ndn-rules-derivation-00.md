@@ -259,7 +259,7 @@ ENUM Activation_Mode:
     DEMAND      -- relation is computed when queried
 ```
 
-Demand relations introduce lazy evaluation; negation over a demand relation is deferred until its dependencies have been tabled. (The backward-chaining RFC will specify this in detail.)
+Demand relations are evaluated on query. A rule that negates a demand relation is rejected at install (draft-ndn-demand-evaluation-00, R-negation-demand-rejected).
 
 
 ## Out of Scope
@@ -298,7 +298,7 @@ Mica is a live database. Every world starts fresh; rules are installed live with
 | Unbound head variable validation | Lazy: install succeeds, first read fails with `UnboundHeadVariable` error | Eager: install fails with `Unbound_Head_Variable` error | Eager validation at install time (Rust behavior changes to match omica) | Improvement |
 | `_` holes in positive rule bodies | Rejected at parse | Independent anonymous variables | omica behavior (differential run D-020) | Improvement |
 | Stratification validation | At install time, rejects unstratified rules | At install time, rejects unstratified rules | At install time (no change) | Parity |
-| Negation safety check (unbound terms) | At evaluation time, fails with `UnsafeNegation` | At evaluation time, fails with `Unsafe_Negation` | At evaluation time (no change) | Parity |
+| Negation and guard safety (unbound terms) | Unsafe negation installs, then the first read fails with `E_DB UnsafeNegation`; a comparison on a query variable is rejected at parse | Rejected at install: `Unsafe_Negation`, `Unsafe_Guard` | Rejected at install ([R-unsafe-negation-guard]) | Improvement (differential run D-022) |
 | Guard safety check (unbound operands) | At evaluation time, fails | At evaluation time, fails | At evaluation time (no change) | Parity |
 | Non-recursive evaluation (stratified) | Single pass through strata | Single pass or fixpoint with 1 iteration | Stratified single-pass semantics (no change) | Parity |
 | Recursive evaluation (fixpoint) | Semi-naive: seed + delta rounds until convergence | Semi-naive: seed + delta rounds until convergence | Semi-naive fixpoint (no change) | Parity |
@@ -308,7 +308,7 @@ Mica is a live database. Every world starts fresh; rules are installed live with
 | Incremental maintenance | Lazy differential: weighted deltas, maintained after first read | Full fixpoint recompute on every commit (Stage 1: blocks + COW) | Observable guarantee only; algorithm deferred to incremental-maintenance design | Gap → Scheduled |
 | Derived state persistence | Separate from extensional; fingerprint-based recovery (planned) | Separate from extensional; always re-derived | Never persist derived facts; re-derive on restart (no change) | Parity |
 | Rule enable/disable | Supported; recomputes derived relations | Supported; recomputes derived relations | Supported (no change) | Parity |
-| Activation mode (eager/demand) | All eager (lazy differential is implementation detail) | All eager | Declared per relation; backward-chaining RFC will add demand mode | Extension |
+| Activation mode (eager/demand) | All eager (lazy differential is an implementation detail) | All eager | Declared per relation; demand mode in draft-ndn-demand-evaluation-00 | Extension |
 | Cache invalidation strategy | Explicit on rule install | Implicit (no persistent cache) | Not specified; implementations may vary | Implementation-defined |
 
 
