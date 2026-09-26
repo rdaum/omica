@@ -5163,8 +5163,8 @@ app_conformance_run :: proc(
 		if vm.program_validate(program) != .None {
 			return v.Value(0), false
 		}
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		replaced := world_replace_program(world, program, alloc)
+		assert(replaced.ok, replaced.message)
 	}
 	// Resolve identity-named role values against the loaded world.
 	resolved := make([]k.Role_Pair, len(roles), context.temp_allocator)
@@ -5397,8 +5397,8 @@ conformance_run :: proc(
 		if vm.program_validate(program) != .None {
 			return v.Value(0), false
 		}
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		replaced := world_replace_program(world, program, alloc)
+		assert(replaced.ok, replaced.message)
 	}
 	if setup := world_call(world, "setup", nil); setup.kind != .Complete {
 		if setup.message != "no applicable method" {
@@ -5544,8 +5544,8 @@ compiler_emit :: proc(
 		if vm.program_validate(program) != .None {
 			return nil, false
 		}
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		replaced := world_replace_program(world, program, alloc)
+		assert(replaced.ok, replaced.message)
 	}
 	outcome := world_call(
 		world,
@@ -5614,8 +5614,8 @@ run_target :: proc(
 	if vm.program_validate(program) != .None {
 		return v.Value(0), false
 	}
-	vm.program_destroy(world.program, world.allocator)
-	world.program = program
+	replaced := world_replace_program(world, program, alloc)
+	assert(replaced.ok, replaced.message)
 	bench := world_call(world, "bench", nil)
 	if bench.kind != .Complete {
 		testing.expectf(t, false, "target bench: %s", bench.message)

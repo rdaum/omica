@@ -47,29 +47,29 @@ Task_Outcome :: struct {
 }
 
 Task :: struct {
-	id:        Task_ID,
-	kernel:    ^k.Kernel,
-	program:   ^vm.Program,
-	env:       ^Builtin_Env,
-	allocator: mem.Allocator,
-
-	state:   vm.VM,
-	tx:      k.Transaction,
-	source:  k.Relation_Source,
-	has_tx:  bool,
-	outcome: Task_Outcome,
+	id:                    Task_ID,
+	kernel:                ^k.Kernel,
+	program:               ^vm.Program,
+	env:                   ^Builtin_Env,
+	allocator:             mem.Allocator,
+	state:                 vm.VM,
+	tx:                    k.Transaction,
+	source:                k.Relation_Source,
+	has_tx:                bool,
+	outcome:               Task_Outcome,
 
 	// Policy-derived authority, minted at init when the environment enforces
 	// it. Tasks without one run with root access.
-	authority:     k.Authority,
-	has_authority: bool,
+	authority:             k.Authority,
+	has_authority:         bool,
 
 	// Set by the scheduler; a running task aborts at its next boundary.
-	cancel_requested: bool,
+	cancel_requested:      bool,
 
 	// Task-owned effects staged until the current transaction commits and
 	// discarded on abort (see #47).
 	pending_sends:         [dynamic]Pending_Send,
+	programs_changed:      bool,
 	pending_subscriptions: [dynamic]^Subscription,
 	pending_cancels:       [dynamic]v.Value,
 }
@@ -190,6 +190,7 @@ task_flush_pending :: proc(task: ^Task) {
 // Discards staged task effects on abort.
 @(private)
 task_discard_pending :: proc(task: ^Task) {
+	task_refresh_programs(task)
 	if task.env != nil {
 		for subscription in task.pending_subscriptions {
 			subscriptions_discard(task.env, subscription)
@@ -233,6 +234,7 @@ task_commit :: proc(task: ^Task) -> k.Kernel_Error {
 	}
 	k.snapshot_release(committed)
 	task_flush_pending(task)
+	task_refresh_programs(task)
 	if task.env != nil {
 		subscriptions_dispatch(task.env)
 	}
@@ -245,7 +247,7 @@ task_abort :: proc(task: ^Task, message: string) -> Task_Outcome {
 	task_discard_pending(task)
 	task.outcome = Task_Outcome {
 		kind    = .Aborted,
-		error   = task.state.error,
+		error   = v.value_deep_copy(task.allocator, task.state.error),
 		message = message,
 	}
 	return task.outcome
@@ -266,7 +268,7 @@ task_run :: proc(task: ^Task) -> Task_Outcome {
 			task_end_tx(task)
 			task.outcome = Task_Outcome {
 				kind  = .Complete,
-				value = task.state.result,
+				value = v.value_deep_copy(task.allocator, task.state.result),
 			}
 			return task.outcome
 
@@ -393,4 +395,17 @@ task_cancel :: proc(task: ^Task) -> Task_Outcome {
 		return task.outcome
 	}
 	return task_abort(task, "cancelled")
+}
+
+@(private)
+task_refresh_programs :: proc(task: ^Task) {
+	if !task.programs_changed || task.env == nil || task.env.world == nil {return}
+	snapshot := k.kernel_snapshot(task.kernel)
+	source := k.Relation_Source {
+		kernel   = task.kernel,
+		snapshot = snapshot,
+	}
+	vm.program_registry_refresh(&task.env.world.programs, &source)
+	k.snapshot_release(snapshot)
+	task.programs_changed = false
 }

@@ -133,6 +133,9 @@ let values = [2, 3]
 add(@values)
 ```
 
+Named verb calls can splice arguments when the verb belongs to another installed program.
+These calls use ordinary positional dispatch, including parameter restrictions, defaults, rest arguments, and invocation authority.
+
 Function arguments are evaluated from left to right. Each argument keeps the value it had when
 evaluated, even if a later argument changes the binding from which it came. Binary operands follow
 the same rule:

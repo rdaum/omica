@@ -4,13 +4,16 @@ package main
 
 import "core:fmt"
 import "core:os"
-
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import v "../../mica/var"
 import vm "../../mica/vm"
 
-COMPILER :: []string{"apps/compiler/lex.mica", "apps/compiler/parse.mica", "apps/compiler/emit.mica"}
+COMPILER :: []string {
+	"apps/compiler/lex.mica",
+	"apps/compiler/parse.mica",
+	"apps/compiler/emit.mica",
+}
 TARGET_SRC :: "let x = 1 + 2\nif x > 0\n  return x\nend\n"
 
 main :: proc() {
@@ -70,22 +73,28 @@ run_lexer :: proc(replace: []u8) -> v.Value {
 		context.allocator,
 		r.HARNESS_CONFIG,
 	)
-	if !start.ok { fmt.eprintln("lexer load:", start.message); return v.Value(0) }
+	if !start.ok {fmt.eprintln("lexer load:", start.message); return v.Value(0)}
 	defer r.world_destroy(world)
 	_ = r.world_wait(world, world.entry)
 	if replace != nil {
 		program, err := vm.program_from_bytes(replace, context.allocator)
-		if err != .None { fmt.eprintln("decode:", err); return v.Value(0) }
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		if err != .None {fmt.eprintln("decode:", err); return v.Value(0)}
+		replaced := r.world_replace_program(world, program, context.allocator)
+		assert(replaced.ok, replaced.message)
 	}
-	outcome := r.world_call(world, "lex", []k.Role_Pair{{
-		role  = v.value_symbol(v.symbol_intern("source")),
-		value = v.value_string(context.allocator, TARGET_SRC),
-	}})
+	outcome := r.world_call(
+		world,
+		"lex",
+		[]k.Role_Pair {
+			{
+				role = v.value_symbol(v.symbol_intern("source")),
+				value = v.value_string(context.allocator, TARGET_SRC),
+			},
+		},
+	)
 	if outcome.kind != .Complete {
 		detail := outcome.message
-		if ev, is_err := v.value_as_error(outcome.error); is_err { detail = ev.message }
+		if ev, is_err := v.value_as_error(outcome.error); is_err {detail = ev.message}
 		fmt.eprintln("lex call failed:", detail)
 		return v.Value(0)
 	}

@@ -70,6 +70,9 @@ Transaction :: struct {
 	// Set when a staged entry cannot be published, for example because a
 	// concurrent transaction claimed the same name.
 	catalog_conflict:    bool,
+	rule_additions:      [dynamic]Rule_Definition,
+	source_install:      bool,
+	identity_names:      map[v.Symbol]v.Value,
 	// Set when a buffer change could not be reconciled: overlapping edits, a
 	// compaction boundary, or the rebase budget exhausted.
 	buffer_conflict:     bool,
@@ -107,6 +110,8 @@ transaction_begin :: proc(kernel: ^Kernel) -> Transaction {
 
 // Releases transaction resources. Safe to call after commit.
 transaction_destroy :: proc(transaction: ^Transaction) {
+	delete(transaction.identity_names)
+	transaction.identity_names = nil
 	for &writes in transaction.writes {
 		delete(writes.entries)
 		delete(writes.buckets)
@@ -127,6 +132,8 @@ transaction_destroy :: proc(transaction: ^Transaction) {
 	}
 	delete(transaction.buffer_writes)
 	transaction.buffer_writes = nil
+	delete(transaction.rule_additions)
+	transaction.rule_additions = nil
 	delete(transaction.catalog_changes)
 	transaction.catalog_changes = nil
 
@@ -227,6 +234,8 @@ transaction_create_relation :: proc(
 	Relation_ID,
 	Kernel_Error,
 ) {
+	if transaction.read_only {return 0, .Read_Only}
+
 	if err := validate_relation_metadata(metadata); err != .None {
 		return 0, err
 	}
@@ -254,6 +263,7 @@ transaction_create_relation :: proc(
 	staged := metadata_clone(transaction.allocator, metadata)
 	staged.id = id
 	append(&transaction.catalog_changes, Staged_Catalog_Change{kind = .Create, metadata = staged})
+	transaction.derived_valid = false
 	return id, .None
 }
 
@@ -425,6 +435,7 @@ transaction_record_write :: proc(
 	tuple: v.Tuple,
 	kind: Write_Kind,
 ) {
+	if relation == SYSTEM_NAMED_IDENTITY_ID {clear(&transaction.identity_names)}
 	writes, _ := transaction_relation_writes(transaction, relation, true)
 	hash := v.tuple_hash(tuple)
 	if index := transaction_find_write(writes, tuple, hash); index >= 0 {
@@ -656,7 +667,7 @@ transaction_tuple_for_key :: proc(
 	v.Tuple,
 	bool,
 ) {
-	metadata, ok := snapshot_relation_metadata(transaction.base, relation)
+	metadata, ok := transaction_relation_metadata(transaction, relation)
 	if !ok {
 		return nil, false
 	}
@@ -732,7 +743,8 @@ transaction_evaluate_derived :: proc(transaction: ^Transaction) -> Kernel_Error 
 	// made each read of a derived relation cost a full closure evaluation.
 	if len(transaction.writes) == 0 &&
 	   len(transaction.buffer_writes) == 0 &&
-	   len(transaction.catalog_changes) == 0 {
+	   len(transaction.catalog_changes) == 0 &&
+	   len(transaction.rule_additions) == 0 {
 		transaction.derived = transaction.base.derived
 		transaction.derived_valid = true
 		return .None
@@ -754,8 +766,10 @@ transaction_evaluate_derived :: proc(transaction: ^Transaction) -> Kernel_Error 
 		transaction = transaction,
 		derived     = &result,
 	}
-	if err := rules_evaluate_source(alloc, transaction.base.rules, &source, &result);
-	   err != .None {
+	definitions := make([dynamic]Rule_Definition, alloc)
+	append(&definitions, ..transaction.base.rules)
+	append(&definitions, ..transaction.rule_additions[:])
+	if err := rules_evaluate_source(alloc, definitions[:], &source, &result); err != .None {
 		return err
 	}
 
@@ -770,6 +784,13 @@ transaction_validate_conflicts :: proc(
 	transaction: ^Transaction,
 	current: ^Snapshot,
 ) -> Kernel_Error {
+	if transaction.source_install {
+		for relation in ([]Relation_ID{DISPATCH_METHOD_SELECTOR_ID, DISPATCH_METHOD_PROGRAM_ID, DISPATCH_PARAM_ID}) {
+			before, _ := snapshot_relation_block(transaction.base, relation)
+			now, _ := snapshot_relation_block(current, relation)
+			if before != now {return .Conflict}
+		}
+	}
 	if err := transaction_buffer_validate(transaction, current); err != .None {
 		return err
 	}
@@ -778,6 +799,11 @@ transaction_validate_conflicts :: proc(
 		metadata, ok := snapshot_relation_metadata(transaction.base, writes.relation)
 		if !ok {
 			continue
+		}
+		// Older stores described NamedIdentity as a set. Enforce name
+		// uniqueness during rebase for those snapshots too.
+		if writes.relation == SYSTEM_NAMED_IDENTITY_ID {
+			metadata.conflict = conflict_functional([]u16{1})
 		}
 		switch metadata.conflict.kind {
 		case .Event_Append:
@@ -892,7 +918,8 @@ transaction_commit :: proc(transaction: ^Transaction) -> (^Snapshot, Kernel_Erro
 	// grow the store on the shutdown checkpoint.
 	if len(transaction.writes) == 0 &&
 	   len(transaction.buffer_writes) == 0 &&
-	   len(transaction.catalog_changes) == 0 {
+	   len(transaction.catalog_changes) == 0 &&
+	   len(transaction.rule_additions) == 0 {
 		return kernel_snapshot(kernel), .None
 	}
 
@@ -991,6 +1018,8 @@ transaction_commit :: proc(transaction: ^Transaction) -> (^Snapshot, Kernel_Erro
 @(private)
 transaction_write_stripes :: proc(transaction: ^Transaction) -> [RELATION_LOCK_STRIPES]bool {
 	stripes: [RELATION_LOCK_STRIPES]bool
+	if len(transaction.rule_additions) >
+	   0 {stripes[int(SYSTEM_RULE_ID) % RELATION_LOCK_STRIPES] = true}
 	for writes in transaction.writes {
 		stripes[int(writes.relation) % RELATION_LOCK_STRIPES] = true
 	}
@@ -1042,7 +1071,12 @@ transaction_build_candidate :: proc(
 				transaction.catalog_conflict = true
 				return fork
 			}
-			snapshot_add_relation(fork, metadata_clone(fork.allocator, change.metadata))
+			// Later snapshots shallow-copy catalogue metadata. Its nested slices
+			// must outlive this candidate and the transaction staging arena.
+			sync.mutex_lock(&kernel.catalog_lock)
+			owned_metadata := metadata_clone(kernel.world_allocator, change.metadata)
+			sync.mutex_unlock(&kernel.catalog_lock)
+			snapshot_add_relation(fork, owned_metadata)
 		case .Kill:
 			// Tombstone the entry in the candidate and release its content.
 			for &metadata in fork.catalog {
@@ -1057,6 +1091,18 @@ transaction_build_candidate :: proc(
 				break
 			}
 		}
+	}
+
+	for definition in transaction.rule_additions {
+		sync.mutex_lock(&kernel.catalog_lock)
+		owned := rule_definition_clone(kernel.world_allocator, definition)
+		sync.mutex_unlock(&kernel.catalog_lock)
+		snapshot_add_rule(fork, owned)
+	}
+	if len(transaction.rule_additions) > 0 {
+		active := snapshot_active_rules(fork, context.temp_allocator)
+		if _, ok := rules_stratify(active, context.temp_allocator);
+		   !ok {transaction.catalog_conflict = true; return fork}
 	}
 
 	for &writes in transaction.writes {

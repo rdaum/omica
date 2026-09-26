@@ -217,6 +217,8 @@ See [Relations](./relations.md#relation-value-algebra) for heading and duplicate
 
 | Function                                                     | Result                                     |
 | ------------------------------------------------------------ | ------------------------------------------ |
+| `compile(source)`                                         | encoded program bytes                     |
+| `install_source(source)`                                  | installed program identity                |
 | `make_identity(:name)`                                       | named identity                             |
 | `make_relation(:Name, arity[, durability])`                  | relation identity                          |
 | `make_functional_relation(:Name, arity, keys[, durability])` | functional relation identity               |
@@ -228,9 +230,59 @@ See [Relations](./relations.md#relation-value-algebra) for heading and duplicate
 | `fileout_rules([:Relation])`                                 | active rule source                         |
 | `tasks()`                                                    | current task snapshots                     |
 
-The optional durability symbol is `:durable` or `:volatile`. Definition, destruction, and
-rule-disabling operations require administrative authority. `destroy_identity` also removes the
-identity's `NamedIdentity` name binding.
+`make_identity` accepts one symbol, including a computed name passed into a verb.
+It requires administrative authority and a writable transaction.
+Repeated calls return the same identity while its name binding exists.
+Distinct names receive distinct allocated identities.
+The creating task sees its `NamedIdentity` fact immediately; other tasks see it after commit.
+Abort discards the binding. Concurrent creation of the same name conflicts at commit.
+A fresh transaction can retrieve the winning identity.
+Committed bindings survive store recovery and are available to later source compilation.
+`destroy_identity` removes the binding; creating that name again produces a new identity.
+
+`compile(source)` returns the encoded bytes used by `assemble` and `ProgramBytes`.
+It reads the caller's catalogue without installing definitions or executing the program.
+Ordinary tasks may compile expressions. Compiling definitions requires administrative authority.
+
+`install_source(source)` installs verbs, rules, and literal identity or relation declarations.
+It requires administrative authority and a writable transaction, checked before any catalogue mutation.
+It rejects arbitrary top-level expressions and grant blocks; execute those in the caller instead.
+The current parser does not support type-alias declarations.
+Parsing, compilation, and definition validation must all succeed before staging changes in the caller's transaction.
+Failure leaves that transaction unchanged. Success follows its commit or abort boundary.
+The caller can dispatch installed methods before commit.
+
+Replacing a verb with the same selector and ordered parameter signature preserves its method identity and invoke grants.
+Other signatures remain separate methods.
+Concurrent method installations from the same catalogue view can conflict at commit.
+Each method refers to a program artifact and a function index.
+Running tasks retain their original frames when a method is replaced.
+Direct calls stay in their defining program; dynamic calls use the task's transaction view.
+
+Program artifacts persist in `ProgramBytes`, including earlier versions required by historical snapshots.
+Decoded images are released when no task or installed method retains them.
+An interned function value retains its defining image for the world's lifetime, including values returned to a host.
+There is currently no collector for unreachable function handles.
+
+Relation constructors accept computed arguments, including calls inside verbs. They return the
+relation identity. Arity must be an integer from 0 through 65535. Functional keys must be a list
+of distinct, zero-based positions within that arity. An empty key permits at most one tuple.
+The optional durability symbol is `:durable` or `:volatile`. The default is `:durable`.
+
+A matching declaration returns the existing identity. A different arity, key list, conflict policy,
+or durability produces `E_INVARG`. Invalid argument types produce `E_TYPE`.
+
+Runtime creation requires administrative authority and a writable transaction. The schema,
+reflection facts, and initial tuples become visible together at commit. The creating task can
+use them before commit. Aborting the transaction discards all three. Concurrent creations of the
+same name conflict at commit. A fresh transaction can adopt the winning declaration.
+
+Later compilation resolves committed relation names. Creating a name during execution does not
+change earlier compilation. Filein separately prepares literal declarations before compiling their
+uses, with the same validation. Those declarations exist before the entry task executes.
+
+Definition, destruction, and rule-disabling operations require administrative authority.
+`destroy_identity` also removes the identity's `NamedIdentity` name binding.
 
 ## Runtime Context, Effects, and Coordination
 

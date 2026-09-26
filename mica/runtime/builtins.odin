@@ -30,10 +30,12 @@ Builtin_Spec :: struct {
 // calling instruction.
 @(private)
 runtime_builtins := [?]Builtin_Spec {
-	{"make_identity", 1, builtin_make_identity},
+	{"make_identity", -1, builtin_make_identity},
+	{"compile", -1, builtin_compile},
+	{"install_source", -1, builtin_install_source},
 	{"destroy_identity", 1, builtin_destroy_identity},
-	{"make_relation", 2, builtin_relation},
-	{"make_functional_relation", 3, builtin_relation},
+	{"make_relation", -1, builtin_make_relation},
+	{"make_functional_relation", -1, builtin_make_functional_relation},
 	// Variadic: the third argument is the conflict policy.
 	{"make_buffer", -1, builtin_make_buffer},
 	{"buffer_insert", 3, builtin_buffer_insert},
@@ -171,32 +173,34 @@ install_builtin_names :: proc(ctx: ^c.Compile_Context) {
 	}
 }
 
+primitive_identities :: [?]struct {
+	name: string,
+	id:   v.Identity,
+} {
+	{"bool", v.BOOL_PROTOTYPE},
+	{"integer", v.INTEGER_PROTOTYPE},
+	{"float", v.FLOAT_PROTOTYPE},
+	{"identity", v.IDENTITY_PROTOTYPE},
+	{"symbol", v.SYMBOL_PROTOTYPE},
+	{"error_code", v.ERROR_CODE_PROTOTYPE},
+	{"string", v.STRING_PROTOTYPE},
+	{"bytes", v.BYTES_PROTOTYPE},
+	{"list", v.LIST_PROTOTYPE},
+	{"map", v.MAP_PROTOTYPE},
+	{"range", v.RANGE_PROTOTYPE},
+	{"error", v.ERROR_PROTOTYPE},
+	{"capability", v.CAPABILITY_PROTOTYPE},
+	{"frob", v.FROB_PROTOTYPE},
+	{"function", v.FUNCTION_PROTOTYPE},
+	{"relation", v.RELATION_PROTOTYPE},
+}
+
 // Primitive prototype identities such as `#string` and `#identity` are always
 // available to source, independent of any `make_identity` declarations.
 @(private)
 install_primitive_identities :: proc(ctx: ^c.Compile_Context) {
-	prototypes := [?]struct {
-		name: string,
-		id:   v.Identity,
-	} {
-		{"bool", v.BOOL_PROTOTYPE},
-		{"integer", v.INTEGER_PROTOTYPE},
-		{"float", v.FLOAT_PROTOTYPE},
-		{"identity", v.IDENTITY_PROTOTYPE},
-		{"symbol", v.SYMBOL_PROTOTYPE},
-		{"error_code", v.ERROR_CODE_PROTOTYPE},
-		{"string", v.STRING_PROTOTYPE},
-		{"bytes", v.BYTES_PROTOTYPE},
-		{"list", v.LIST_PROTOTYPE},
-		{"map", v.MAP_PROTOTYPE},
-		{"range", v.RANGE_PROTOTYPE},
-		{"error", v.ERROR_PROTOTYPE},
-		{"capability", v.CAPABILITY_PROTOTYPE},
-		{"frob", v.FROB_PROTOTYPE},
-		{"function", v.FUNCTION_PROTOTYPE},
-		{"relation", v.RELATION_PROTOTYPE},
-	}
-	for prototype in prototypes {
+
+	for prototype in primitive_identities {
 		ctx.identities[prototype.name] = v.value_identity(prototype.id)
 	}
 }
@@ -323,8 +327,7 @@ actor_assumption_allowed :: proc(state: ^vm.VM, actor: v.Identity) -> bool {
 	if k.authority_can_grant(state.authority) {
 		return true
 	}
-	env := builtin_env(state)
-	relation, found := env.ctx.relations["session/CanAssumeActor"]
+	relation, found := runtime_relation_named(state, "session/CanAssumeActor")
 	if !found || state.transaction == nil {
 		return false
 	}
@@ -1337,7 +1340,7 @@ capability_target_argument :: proc(
 				vm.vm_set_error(state, "E_TYPE", "capability target is unknown")
 				return .All, nil, nil, false
 			}
-			relation, found := env.ctx.relations[name]
+			relation, found := runtime_relation_named(state, name)
 			if !found {
 				vm.vm_set_error(state, "E_INVARG", "capability target is not a relation")
 				return .All, nil, nil, false
@@ -1478,7 +1481,6 @@ rule_active_builtin :: proc(
 }
 
 
-
 // Decodes a base64url byte literal (`b"3q2-7w=="`) at execution time. The
 // Mica emitter has no base64 facility, so emitted code calls this.
 @(private)
@@ -1575,7 +1577,7 @@ builtin_rules :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 		return builtin_error(state, "E_INVARG", "rules expects a named relation symbol")
 	}
 	env := builtin_env(state)
-	relation_id, known := env.ctx.relations[name]
+	relation_id, known := runtime_relation_named(state, name)
 	if !known {
 		return builtin_error(
 			state,
@@ -1674,7 +1676,7 @@ builtin_fileout_rules :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool)
 		if !has_name {
 			return builtin_error(state, "E_INVARG", "fileout_rules expects a named relation symbol")
 		}
-		known_id, known := env.ctx.relations[name]
+		known_id, known := runtime_relation_named(state, name)
 		if !known {
 			return builtin_error(
 				state,
@@ -1823,7 +1825,7 @@ builtin_subscribe_changes :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, b
 		if !relation_name_ok {
 			return builtin_error(state, "E_INVARG", "unknown subscription relation")
 		}
-		relation, found := env.ctx.relations[relation_name]
+		relation, found := runtime_relation_named(state, relation_name)
 		if !found {
 			return builtin_error(state, "E_INVARG", "unknown subscription relation")
 		}
@@ -2793,7 +2795,7 @@ builtin_relation_literal :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bo
 }
 
 // Asserts or retracts one row of a relation addressed by name, resolving the
-// relation id at execution time through the world's compile context. This is
+// relation id at execution time through the task catalogue. This is
 // the runtime-resolution path for relation writes: an emitted program names
 // the relation instead of baking a kernel id, so the same artifact stays
 // valid across worlds whose relation ids differ.
@@ -2817,8 +2819,7 @@ builtin_relation_write :: proc(
 	if state.transaction == nil {
 		return builtin_error(state, "E_NO_TRANSACTION", "relation write has no transaction")
 	}
-	env := builtin_env(state)
-	relation, known := env.ctx.relations[name]
+	relation, known := runtime_relation_named(state, name)
 	if !known {
 		return builtin_error(
 			state,

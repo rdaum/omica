@@ -995,13 +995,14 @@ scheduler_release :: proc(scheduler: ^Scheduler, id: Task_ID) {
 	if entry == nil {
 		return
 	}
-	if entry.owned_program {
-		vm.program_destroy(entry.task.program, scheduler.allocator)
-	}
+
 	if entry.arguments != nil {
 		delete(entry.arguments, scheduler.allocator)
 	}
 	task_destroy(entry.task)
+	if entry.owned_program {
+		vm.program_destroy(entry.task.program, scheduler.allocator)
+	}
 	free(entry.task, scheduler.allocator)
 	free(entry, scheduler.allocator)
 }
@@ -1125,21 +1126,22 @@ scheduler_submit_dispatch :: proc(
 	if !found {
 		return Dispatch_Result{error = .No_Program}
 	}
-	function_index, is_int := v.value_as_int(program_value)
-	if !is_int {
-		return Dispatch_Result{error = .No_Program}
-	}
-	arguments, args_ok := k.dispatch_method_args(
-		method.params,
-		roles,
-		scheduler.allocator,
+	resolved, function_index, valid := vm.program_resolve_reference(
+		program.registry,
+		&source,
+		program,
+		program_value,
 	)
+	if !valid {return Dispatch_Result{error = .No_Program}}
+	defer vm.program_release(resolved)
+
+	arguments, args_ok := k.dispatch_method_args(method.params, roles, scheduler.allocator)
 	if !args_ok {
 		return Dispatch_Result{error = .Arguments}
 	}
 
 	task := new(Task, scheduler.allocator)
-	task_init(task, 0, scheduler.kernel, program, env, scheduler.allocator)
+	task_init(task, 0, scheduler.kernel, resolved, env, scheduler.allocator)
 	for fact in facts {
 		if err := k.transaction_assert(&task.tx, fact.relation, fact.tuple); err != .None {
 			task_destroy(task)
@@ -1168,23 +1170,17 @@ scheduler_submit_dispatch :: proc(
 	}
 	vm.vm_set_entry_function(&task.state, i32(function_index))
 	vm.vm_set_entry_arguments(&task.state, arguments)
-	id := scheduler_submit_task(
-		scheduler,
-		task,
-		delay_millis,
-		false,
-		arguments,
-	)
+	id := scheduler_submit_task(scheduler, task, delay_millis, false, arguments)
 	return Dispatch_Result{id = id}
 }
 
 // Builds a child task from a parent's `.Spawn` suspension. The selector and
 // role values are resolved through the kernel's dispatch relations to the
-// method's function, which the child starts at in the shared world program.
+// method's defining program, which the child retains.
 // The parent is resumed with the child's task id.
 @(private)
 scheduler_spawn_child :: proc(scheduler: ^Scheduler, parent: ^Task) -> Task_ID {
-	spec := parent.program.dispatch_specs[parent.state.request_spec]
+	spec := parent.state.program.dispatch_specs[parent.state.request_spec]
 	base := vm.vm_frame_base(&parent.state)
 
 	roles := make([]k.Role_Pair, len(spec.roles), scheduler.allocator)

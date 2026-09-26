@@ -15,7 +15,6 @@ package main
 
 import "core:fmt"
 import "core:os"
-
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import v "../../mica/var"
@@ -532,8 +531,8 @@ run_case :: proc(entry: Case, artifact: []u8) -> (v.Value, bool) {
 			fmt.eprintln(entry.name, "invalid program:", validation)
 			return v.Value(0), false
 		}
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		replaced := r.world_replace_program(world, program, context.allocator)
+		assert(replaced.ok, replaced.message)
 	}
 
 	if entry.setup != "" {

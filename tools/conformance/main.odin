@@ -15,13 +15,16 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
-
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import v "../../mica/var"
 import vm "../../mica/vm"
 
-COMPILER :: []string{"apps/compiler/lex.mica", "apps/compiler/parse.mica", "apps/compiler/emit.mica"}
+COMPILER :: []string {
+	"apps/compiler/lex.mica",
+	"apps/compiler/parse.mica",
+	"apps/compiler/emit.mica",
+}
 
 main :: proc() {
 	dir := "benchmarks/mica"
@@ -139,12 +142,7 @@ run_file :: proc(path: string, artifact: []u8) -> (v.Value, bool) {
 	defer k.kernel_destroy(&kernel)
 	// A mis-emitted loop is unbounded; the budget turns that into a failed
 	// case rather than a hung run.
-	world, start := r.world_start(
-		&kernel,
-		[]string{path},
-		context.allocator,
-		r.HARNESS_CONFIG,
-	)
+	world, start := r.world_start(&kernel, []string{path}, context.allocator, r.HARNESS_CONFIG)
 	if !start.ok {
 		return v.Value(0), false
 	}
@@ -162,8 +160,8 @@ run_file :: proc(path: string, artifact: []u8) -> (v.Value, bool) {
 		if vm.program_validate(program) != .None {
 			return v.Value(0), false
 		}
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		replaced := r.world_replace_program(world, program, context.allocator)
+		assert(replaced.ok, replaced.message)
 	}
 
 	if setup := r.world_call(world, "setup", nil); setup.kind != .Complete {

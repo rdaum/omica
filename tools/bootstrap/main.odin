@@ -16,13 +16,16 @@ package main
 
 import "core:fmt"
 import "core:os"
-
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import v "../../mica/var"
 import vm "../../mica/vm"
 
-COMPILER :: []string{"apps/compiler/lex.mica", "apps/compiler/parse.mica", "apps/compiler/emit.mica"}
+COMPILER :: []string {
+	"apps/compiler/lex.mica",
+	"apps/compiler/parse.mica",
+	"apps/compiler/emit.mica",
+}
 
 // A target exercising literals, arithmetic, control flow, a call, a relation
 // query/write, a comprehension, and a for-pattern.
@@ -130,13 +133,19 @@ compile_with :: proc(target: string, replace: []u8 = nil) -> ([]u8, bool) {
 		if vm.program_validate(program) != .None {
 			return nil, false
 		}
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		replaced := r.world_replace_program(world, program, context.allocator)
+		assert(replaced.ok, replaced.message)
 	}
-	outcome := r.world_call(world, "emit_source", []k.Role_Pair{{
-		role  = v.value_symbol(v.symbol_intern("source")),
-		value = v.value_string(context.allocator, target),
-	}})
+	outcome := r.world_call(
+		world,
+		"emit_source",
+		[]k.Role_Pair {
+			{
+				role = v.value_symbol(v.symbol_intern("source")),
+				value = v.value_string(context.allocator, target),
+			},
+		},
+	)
 	if outcome.kind != .Complete {
 		return nil, false
 	}
@@ -225,12 +234,7 @@ run_artifact :: proc(target: string, artifact: []u8) -> (v.Value, bool) {
 	defer k.kernel_destroy(&kernel)
 	// A mis-emitted loop is unbounded; the budget turns that into a failed
 	// case rather than a hung run.
-	world, start := r.world_start(
-		&kernel,
-		[]string{path},
-		context.allocator,
-		r.HARNESS_CONFIG,
-	)
+	world, start := r.world_start(&kernel, []string{path}, context.allocator, r.HARNESS_CONFIG)
 	if !start.ok {
 		fmt.eprintln("target load failed:", start.message)
 		return v.Value(0), false
@@ -249,8 +253,8 @@ run_artifact :: proc(target: string, artifact: []u8) -> (v.Value, bool) {
 		fmt.eprintln("target artifact invalid")
 		return v.Value(0), false
 	}
-	vm.program_destroy(world.program, world.allocator)
-	world.program = program
+	replaced := r.world_replace_program(world, program, context.allocator)
+	assert(replaced.ok, replaced.message)
 	bench := r.world_call(world, "bench", nil)
 	if bench.kind != .Complete {
 		fmt.eprintln("target bench:", bench.message)
