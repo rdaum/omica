@@ -38,7 +38,11 @@ Snapshot :: struct {
 	blocks:    []^Relation_Block,
 	buffers:   []^Buffer_Block,
 	rules:     []Rule_Definition,
-	derived:   []Derived_Relation,
+	// Derived relations, one block per relation with rows, kept apart from
+	// `blocks` so checkpoints, the log and restore never see derived rows.
+	// The snapshot holds one reference to each; an unchanged relation shares
+	// its block with the snapshot it was derived from.
+	derived_blocks: []^Relation_Block,
 }
 
 // Creates an empty snapshot with arrays allocated from a pooled arena owned by
@@ -58,7 +62,7 @@ snapshot_create :: proc(kernel: ^Kernel, version: u64, parent: ^Snapshot) -> ^Sn
 	snapshot.blocks = nil
 	snapshot.buffers = nil
 	snapshot.rules = nil
-	snapshot.derived = nil
+	snapshot.derived_blocks = nil
 	return snapshot
 }
 
@@ -95,6 +99,7 @@ snapshot_release :: proc(snapshot: ^Snapshot) {
 		buffer_block_release(block)
 	}
 	snapshot.buffers = nil
+	snapshot_release_derived(snapshot)
 	if snapshot.arena != nil {
 		arena_pool_return(snapshot.pool, snapshot.arena)
 		snapshot.arena = nil
@@ -183,14 +188,40 @@ snapshot_relation_block :: proc(
 	return nil, false
 }
 
-// Returns the rows of a derived relation stored on this snapshot.
-snapshot_derived_rows :: proc(snapshot: ^Snapshot, relation: Relation_ID) -> []v.Tuple {
-	for derived in snapshot.derived {
-		if derived.relation == relation {
-			return derived.tuples
+// The block holding a derived relation's rows on this snapshot.
+snapshot_derived_block :: proc(snapshot: ^Snapshot, relation: Relation_ID) -> (^Relation_Block, bool) {
+	for block in snapshot.derived_blocks {
+		if block.metadata.id == relation {
+			return block, true
 		}
 	}
-	return nil
+	return nil, false
+}
+
+// The rows of a derived relation on this snapshot, materialized into `alloc`
+// (the tuples still point into the block).
+snapshot_derived_rows :: proc(
+	snapshot: ^Snapshot,
+	relation: Relation_ID,
+	alloc := context.temp_allocator,
+) -> []v.Tuple {
+	block, ok := snapshot_derived_block(snapshot, relation)
+	if !ok {
+		return nil
+	}
+	rows := make([]v.Tuple, relation_block_len(block), alloc)
+	for &row, index in rows {
+		row = relation_block_row(block, index)
+	}
+	return rows
+}
+
+@(private)
+snapshot_release_derived :: proc(snapshot: ^Snapshot) {
+	for block in snapshot.derived_blocks {
+		relation_block_release(block)
+	}
+	snapshot.derived_blocks = nil
 }
 
 // Reports whether a relation tuple is visible in this snapshot, including
@@ -201,10 +232,8 @@ snapshot_contains :: proc(snapshot: ^Snapshot, relation: Relation_ID, tuple: v.T
 			return true
 		}
 	}
-	for row in snapshot_derived_rows(snapshot, relation) {
-		if v.tuple_eq(row, tuple) {
-			return true
-		}
+	if block, ok := snapshot_derived_block(snapshot, relation); ok {
+		return relation_block_contains(block, tuple)
 	}
 	return false
 }
@@ -405,9 +434,9 @@ derived_row_cmp :: proc(entry: ^Derived_Columns, a, b: u32) -> v.Ordering {
 // Computes all derived relations for a snapshot from its active rules and
 // stores them on the snapshot. Evaluation runs in a short-lived arena; the
 // surviving tuples are deep-copied into the snapshot arena.
-snapshot_compute_derived :: proc(snapshot: ^Snapshot, kernel: ^Kernel = nil) {
+snapshot_compute_derived :: proc(snapshot: ^Snapshot, kernel: ^Kernel = nil, base: ^Snapshot = nil) {
+	snapshot_release_derived(snapshot)
 	if len(snapshot.rules) == 0 {
-		snapshot.derived = nil
 		return
 	}
 
@@ -434,10 +463,71 @@ snapshot_compute_derived :: proc(snapshot: ^Snapshot, kernel: ^Kernel = nil) {
 		derived  = &derived,
 	}
 	if err := rules_evaluate_source(alloc, snapshot.rules, &source, &derived); err != .None {
-		snapshot.derived = nil
 		return
 	}
-	snapshot.derived = derived_relations_from(snapshot.allocator, &derived, arena)
+	snapshot.derived_blocks = derived_blocks_from(snapshot, &derived, arena, base)
+}
+
+// One block per derived relation with rows, in canonical order. A relation
+// whose rows equal `base`'s (a snapshot the caller holds) shares base's block
+// instead of copying it. Sorting and row views use temporary regions of
+// `scratch`, rolled back per relation.
+@(private)
+derived_blocks_from :: proc(
+	snapshot: ^Snapshot,
+	derived: ^Rule_Derived,
+	scratch: ^virtual.Arena,
+	base: ^Snapshot,
+) -> []^Relation_Block {
+	blocks := make([dynamic]^Relation_Block, 0, len(derived.relations), snapshot.allocator)
+	for entry in derived.relations {
+		temp := virtual.arena_temp_begin(scratch)
+		defer virtual.arena_temp_end(temp)
+		order := derived_canonical_order(entry, virtual.arena_allocator(scratch))
+		if len(order) == 0 {
+			continue
+		}
+		if base != nil {
+			if shared, ok := snapshot_derived_block(base, entry.relation); ok && derived_block_matches(shared, entry, order) {
+				relation_block_retain(shared)
+				append(&blocks, shared)
+				continue
+			}
+		}
+		arity := entry.arity
+		values := make([]v.Value, len(order) * arity, virtual.arena_allocator(scratch))
+		rows := make([]v.Tuple, len(order), virtual.arena_allocator(scratch))
+		for row, r in order {
+			view := values[r * arity:(r + 1) * arity]
+			for c in 0 ..< arity {
+				view[c] = entry.columns[c][row]
+			}
+			rows[r] = v.Tuple(view)
+		}
+		metadata, found := snapshot_relation_metadata(snapshot, entry.relation)
+		if !found {
+			metadata = Relation_Metadata{id = entry.relation, arity = u16(arity)}
+		}
+		append(&blocks, relation_block_from_canonical(snapshot.pool, metadata, rows))
+	}
+	return blocks[:]
+}
+
+// Whether `block` holds exactly the rows of `entry` in canonical `order`.
+@(private)
+derived_block_matches :: proc(block: ^Relation_Block, entry: ^Derived_Columns, order: []u32) -> bool {
+	if relation_block_len(block) != len(order) {
+		return false
+	}
+	for row, r in order {
+		stored := v.tuple_values(relation_block_row(block, r))
+		for c in 0 ..< entry.arity {
+			if !v.value_eq(stored[c], entry.columns[c][row]) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Returns the buffer block for a relation, if any.

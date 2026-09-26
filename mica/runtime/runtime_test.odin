@@ -7322,3 +7322,118 @@ test_run_store_boot_derives_once :: proc(t: ^testing.T) {
 		expect_relation_rows(t, &kernel, fmt.tprintf("Reach%d", i), 2)
 	}
 }
+
+// Values a task reads from a relation outlive the transaction that read them
+// (a task keeps them across commits and suspensions, when the rows' chunks can
+// be freed), so every read path hands the VM its own copy, not a pointer into
+// the stored row.
+@(test)
+test_run_relation_reads_are_owned_by_the_task :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	source := `make_identity(:a)
+make_functional_relation(:Label, 2, [0])
+assert Label(#a, "alpha-label")
+
+verb read_one()
+  let exactly {:l -> l} = Label(#a, ?l)
+  return l
+end
+verb read_first()
+  let {:l -> l} = Label(#a, ?l)
+  return l
+end
+verb read_field()
+  return #a.label
+end
+`
+	path, path_ok := write_temp_source(t, "mica_owned_reads_test.mica", source)
+	if !path_ok {
+		return
+	}
+	defer os.remove(path)
+	kernel: k.Kernel
+	k.kernel_init(&kernel)
+	defer k.kernel_destroy(&kernel)
+	world, start := world_start(&kernel, []string{path}, context.temp_allocator)
+	testing.expectf(t, start.ok, "load failed: %s", start.message)
+	if !start.ok {
+		return
+	}
+	defer world_destroy(world)
+	entry := world_wait(world, world.entry)
+	testing.expect_value(t, entry.kind, Task_Outcome_Kind.Complete)
+
+	snapshot := k.kernel_snapshot(&kernel)
+	defer k.snapshot_release(snapshot)
+	label, _ := k.snapshot_relation_metadata_named(snapshot, v.symbol_intern("Label"))
+	block, has_block := k.snapshot_relation_block(snapshot, label.id)
+	testing.expect(t, has_block)
+	if !has_block {
+		return
+	}
+	stored_row := v.tuple_values(k.relation_block_row(block, 0))
+	stored, _ := v.value_as_string(stored_row[1])
+
+	verbs := []string{"read_one", "read_first", "read_field"}
+	for verb in verbs {
+		outcome := world_call(world, verb, nil)
+		testing.expectf(t, outcome.kind == .Complete, "%s failed: %s", verb, outcome.message)
+		got, is_string := v.value_as_string(outcome.value)
+		testing.expectf(t, is_string && got == "alpha-label", "%s returned %v", verb, outcome.value)
+		testing.expectf(t, raw_data(got) != raw_data(stored), "%s returned the stored row's bytes, not a copy", verb)
+	}
+}
+
+// Subscription messages sit in a mailbox until the receiver runs, after the
+// snapshot their rows came from may be gone (and its chunks freed): scanned
+// rows are copies taken while the snapshot is held, and message values own
+// their strings.
+@(test)
+test_run_subscription_rows_are_owned :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	source := `make_relation(:Note, 2)
+assert Note(5, "note-text")
+`
+	path, path_ok := write_temp_source(t, "mica_subscription_owned_test.mica", source)
+	if !path_ok {
+		return
+	}
+	defer os.remove(path)
+	kernel: k.Kernel
+	k.kernel_init(&kernel)
+	defer k.kernel_destroy(&kernel)
+	world, start := world_start(&kernel, []string{path}, context.temp_allocator)
+	testing.expectf(t, start.ok, "load failed: %s", start.message)
+	if !start.ok {
+		return
+	}
+	defer world_destroy(world)
+	_ = world_wait(world, world.entry)
+
+	snapshot := k.kernel_snapshot(&kernel)
+	defer k.snapshot_release(snapshot)
+	note, _ := k.snapshot_relation_metadata_named(snapshot, v.symbol_intern("Note"))
+	block, has_block := k.snapshot_relation_block(snapshot, note.id)
+	testing.expect(t, has_block)
+	if !has_block {
+		return
+	}
+	stored_row := v.tuple_values(k.relation_block_row(block, 0))
+	stored, _ := v.value_as_string(stored_row[1])
+
+	rows := subscription_scan_rows(&world.env, .Facts, note.id, []v.Binding{{}, {}})
+	defer delete(rows)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) != 1 {
+		return
+	}
+	scanned, _ := v.value_as_string(v.tuple_values(rows[0])[1])
+	testing.expect(t, scanned == "note-text")
+	testing.expect(t, raw_data(scanned) != raw_data(stored))
+
+	message := subscription_row_value(&world.env, rows[0])
+	items, _ := v.value_as_list(message)
+	text, _ := v.value_as_string(items[1])
+	testing.expect(t, text == "note-text")
+	testing.expect(t, raw_data(text) != raw_data(scanned))
+}

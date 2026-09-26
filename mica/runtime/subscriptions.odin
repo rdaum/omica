@@ -708,7 +708,9 @@ subscription_row_matches :: proc(bindings: []v.Binding, tuple: v.Tuple) -> bool 
 
 @(private)
 subscription_row_value :: proc(env: ^Builtin_Env, tuple: v.Tuple) -> v.Value {
-	return v.value_list(env.allocator, v.tuple_values(tuple))
+	// A message waits in a mailbox past the transaction the row came from, so
+	// it owns its cells (strings and other heap values included).
+	return v.value_list(env.allocator, v.tuple_values(v.tuple_deep_copy(env.allocator, tuple)))
 }
 
 @(private)
@@ -753,6 +755,13 @@ subscription_scan_rows :: proc(
 		use_stored_derived = subject == .Relation,
 	}
 	k.relation_source_scan_into(&source, relation, bindings, &rows)
+	// The rows point into the snapshot's chunks, which a concurrent commit can
+	// free once the snapshot is released below: copy them while it is held.
+	// Callers consume the copies within the call (baselines and messages make
+	// their own long-lived copies).
+	for &row in rows {
+		row = v.tuple_deep_copy(context.temp_allocator, row)
+	}
 	return rows
 }
 

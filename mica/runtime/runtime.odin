@@ -1348,7 +1348,9 @@ builtin_get_field :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 		vm.vm_set_error(state, "E_KEY", "no field value")
 		return v.Value(0), false
 	}
-	return v.tuple_values(existing)[1], true
+	// The row lives in snapshot storage freed after this transaction; the task
+	// keeps its own copy.
+	return v.value_deep_copy(state.allocator, v.tuple_values(existing)[1]), true
 }
 
 // --- Helpers ---------------------------------------------------------------

@@ -238,8 +238,10 @@ shared_packed_serial :: proc(source: ^Relation_Source, relation: Relation_ID) ->
 	if rules_derived_find(source.derived, relation) != nil {
 		return 0
 	}
-	if source.use_stored_derived && len(snapshot_derived_rows(source.snapshot, relation)) > 0 {
-		return 0
+	if source.use_stored_derived {
+		if block, ok := snapshot_derived_block(source.snapshot, relation); ok && relation_block_len(block) > 0 {
+			return 0
+		}
 	}
 	block, ok := snapshot_relation_block(source.snapshot, relation)
 	if !ok {

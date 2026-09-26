@@ -848,8 +848,9 @@ test_read_only_transaction_reuses_snapshot_derived :: proc(t: ^testing.T) {
 
 	base_rows := snapshot_derived_rows(reader.base, reach)
 	tx_rows := transaction_derived_rows(&reader, reach)
-	testing.expect(t, len(base_rows) > 0)
-	testing.expect(t, raw_data(base_rows) == raw_data(tx_rows))
+	testing.expect(t, len(base_rows) > 0 && len(tx_rows) == len(base_rows))
+	testing.expect(t, reader.derived_from_base)
+	testing.expect(t, raw_data(v.tuple_values(base_rows[0])) == raw_data(v.tuple_values(tx_rows[0])))
 
 	// Staging a write invalidates the reuse and the transaction sees its own
 	// facts derived over the overlay.
@@ -857,7 +858,8 @@ test_read_only_transaction_reuses_snapshot_derived :: proc(t: ^testing.T) {
 	overlay_rows := transaction_rows(&reader, reach, 2)
 	testing.expect(t, has_tuple(overlay_rows[:], tuple_of(a, b)))
 	test_rows := transaction_derived_rows(&reader, reach)
-	testing.expect(t, raw_data(snapshot_derived_rows(reader.base, reach)) != raw_data(test_rows))
+	testing.expect(t, !reader.derived_from_base)
+	testing.expect(t, raw_data(v.tuple_values(snapshot_derived_rows(reader.base, reach)[0])) != raw_data(v.tuple_values(test_rows[0])))
 	delete(overlay_rows)
 }
 
@@ -3288,4 +3290,57 @@ test_functional_staging_scales_linearly :: proc(t: ^testing.T) {
 	} else {
 		testing.fail_now(t, "replacement key is not visible")
 	}
+}
+
+// A block's chunk arenas hold about the rows they store: each 128-row chunk
+// used to take a pooled arena with a 64 KB first block (16x its data), which
+// would make 17.9M derived rows cost ~9 GB.
+@(test)
+test_chunk_arenas_fit_their_rows :: proc(t: ^testing.T) {
+	kernel: Kernel
+	kernel_init(&kernel)
+	defer kernel_destroy(&kernel)
+	defer free_all(context.temp_allocator)
+	ROWS :: 100_000
+	rows := make([]v.Tuple, ROWS, context.temp_allocator)
+	for r in 0 ..< ROWS {
+		rows[r] = tuple_of(must_int(i64(r)), must_int(i64(r % 97)))
+	}
+	block := relation_block_build_pooled(&kernel, Relation_Metadata{id = 1, arity = 2}, rows)
+	defer relation_block_release(block)
+	capacity := 0
+	for chunk in block.chunks {
+		capacity += frame_arena_capacity(chunk.arena)
+	}
+	data := ROWS * (size_of(v.Tuple) + 2 * size_of(v.Value))
+	testing.expectf(t, capacity <= data * 3 / 2, "chunk arenas hold %d bytes for %d of rows", capacity, data)
+}
+
+
+// kernel_scan_into releases the snapshot it scanned before returning, and a
+// concurrent commit can then free that snapshot's chunks: the rows it returns
+// are copies taken while the snapshot was held.
+@(test)
+test_kernel_scan_into_rows_outlive_the_snapshot :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	kernel: Kernel
+	kernel_init(&kernel)
+	defer kernel_destroy(&kernel)
+	note := create_relation(&kernel, 1, "Note", 2)
+	tx := kernel_begin(&kernel)
+	transaction_assert(&tx, note, tuple_of(must_int(1), v.value_string(context.temp_allocator, "scanned-text")))
+	commit_transaction(t, &tx)
+
+	block, _ := snapshot_relation_block(kernel.current, note)
+	stored, _ := v.value_as_string(v.tuple_values(relation_block_row(block, 0))[1])
+	rows: [dynamic]v.Tuple
+	defer delete(rows)
+	kernel_scan_into(&kernel, note, []v.Binding{{}, {}}, &rows)
+	testing.expect_value(t, len(rows), 1)
+	if len(rows) != 1 {
+		return
+	}
+	scanned, _ := v.value_as_string(v.tuple_values(rows[0])[1])
+	testing.expect(t, scanned == "scanned-text")
+	testing.expect(t, raw_data(scanned) != raw_data(stored))
 }
