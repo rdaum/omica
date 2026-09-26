@@ -16,7 +16,7 @@ relation_test_world :: proc(t: ^testing.T, kernel: ^k.Kernel, source, suffix: st
 	world, result := world_start(kernel, []string{path}, context.temp_allocator, World_Config{workers = workers})
 	if !testing.expectf(t, result.ok, "world start failed: %s", result.message) {return nil}
 	outcome := world_wait(world, world.entry)
-	if !testing.expectf(t, outcome.kind == .Complete, "entry failed: %s", outcome.message) {
+	if !testing.expectf(t, outcome.kind == .Complete, "entry failed: %s: %s", outcome.message, v.value_to_string(outcome.error, context.temp_allocator)) {
 		world_destroy(world)
 		return nil
 	}
