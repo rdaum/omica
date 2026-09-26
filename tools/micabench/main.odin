@@ -20,6 +20,7 @@ import "core:time"
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import vm "../../mica/vm"
+import v "../../mica/var"
 
 DEFAULT_SAMPLES :: 15
 DEFAULT_BUDGET_MS :: 20
@@ -37,6 +38,9 @@ main :: proc() {
 	accel_mode := r.Accel_Mode.Unchanged
 	accel_report := false
 	print_result := false
+	raw_samples := false
+	verify_result := false
+	eval_source := ""
 	paths: [dynamic]string
 	defer delete(paths)
 
@@ -80,6 +84,12 @@ main :: proc() {
 			}
 		case arg == "--accel-report":
 			accel_report = true
+		case arg == "--raw-samples":
+			raw_samples = true
+		case arg == "--verify-result":
+			verify_result = true
+		case strings.has_prefix(arg, "--eval="):
+			eval_source = arg[len("--eval="):]
 		case arg == "--result":
 			print_result = true
 		case:
@@ -88,7 +98,7 @@ main :: proc() {
 		index += 1
 	}
 	if len(paths) == 0 {
-		fmt.eprintln("usage: micabench [--samples N] [--budget-ms M] [--workers N] [--accel MODE] [--accel-report] [--result] <file.mica>...")
+		fmt.eprintln("usage: micabench [--samples N] [--budget-ms M] [--workers N] [--accel MODE] [--accel-report] [--result] [--raw-samples] [--verify-result] [--eval=SOURCE] <file.mica>...")
 		os.exit(2)
 	}
 
@@ -100,11 +110,11 @@ main :: proc() {
 			}
 			continue
 		}
-		if run_file(path, samples, budget_ms, workers, accel_mode, accel_report, print_result) {
+		if run_file(path, samples, budget_ms, workers, accel_mode, accel_report, print_result, raw_samples, verify_result, eval_source) {
 			reported += 1
 		}
 	}
-	if reported == 0 {
+	if reported != len(paths) {
 		os.exit(1)
 	}
 }
@@ -153,7 +163,8 @@ run_file :: proc(
 	path: string,
 	samples, budget_ms, workers: int,
 	accel_mode: r.Accel_Mode,
-	accel_report, print_result: bool,
+	accel_report, print_result, raw_samples, verify_result: bool,
+	eval_source: string,
 ) -> bool {
 	kernel: k.Kernel
 	k.kernel_init(&kernel)
@@ -170,6 +181,11 @@ run_file :: proc(
 		return false
 	}
 	defer r.world_destroy(world)
+	entry := r.world_wait(world, world.entry)
+	if entry.kind != .Complete {
+		fmt.eprintf("FAIL %s: entry: %s\n", path, entry.message)
+		return false
+	}
 	before := k.placement_counts()
 
 	// Optional one-time setup.
@@ -180,7 +196,7 @@ run_file :: proc(
 	}
 
 	// The benchmark must resolve.
-	probe := r.world_call(world, "bench", nil)
+	probe := benchmark_call(world, eval_source)
 	if probe.kind != .Complete {
 		fmt.eprintf("FAIL %s: bench: %s\n", path, probe.message)
 		return false
@@ -194,7 +210,8 @@ run_file :: proc(
 	// Calibrate the inner repeat count so one sample spans ~budget_ms.
 	// A larger inner count averages out scheduling jitter; a single slow call
 	// otherwise skews a whole sample.
-	single := time_call(world)
+	single, timed_ok := time_calls(world, eval_source, 1, verify_result, probe.value)
+	if !timed_ok {return false}
 	inner := MIN_INNER
 	if single > 0 {
 		target := i64(time.Duration(budget_ms) * time.Millisecond)
@@ -211,21 +228,20 @@ run_file :: proc(
 
 	// Warm up, then sample.
 	for _ in 0 ..< 2 {
-		for _ in 0 ..< inner {
-			_ = r.world_call(world, "bench", nil)
-		}
+		if _, ok := time_calls(world, eval_source, inner, verify_result, probe.value); !ok {return false}
 	}
 
 	results := make([]i64, samples, context.temp_allocator)
 	defer delete(results, context.temp_allocator)
 	for sample in 0 ..< samples {
-		start_tick := time.tick_now()
-		for _ in 0 ..< inner {
-			_ = r.world_call(world, "bench", nil)
-		}
-		elapsed := i64(time.tick_diff(start_tick, time.tick_now()))
+		elapsed, ok := time_calls(world, eval_source, inner, verify_result, probe.value)
+		if !ok {return false}
 		results[sample] = elapsed / i64(inner)
+		if raw_samples {
+			fmt.printf("sample\t%s\t%d\t%d\t%d\n", filepath.base(path), sample, results[sample], inner)
+		}
 	}
+
 	slice.sort(results)
 
 	median := results[len(results) / 2]
@@ -245,10 +261,28 @@ run_file :: proc(
 	return true
 }
 
-// Times one `bench()` call, returning nanoseconds (0 when not measurable).
+// Live evaluation includes compilation, task dispatch, and execution.
 @(private)
-time_call :: proc(world: ^r.World) -> i64 {
+benchmark_call :: proc(world: ^r.World, eval_source: string) -> r.Task_Outcome {
+	if eval_source != "" {return r.world_eval(world, eval_source)}
+	return r.world_call(world, "bench", nil)
+}
+
+// Check every invocation, including calibration and warmup. Verification is
+// inside the timed interval, so before/after runs must use the same flags.
+@(private)
+time_calls :: proc(world: ^r.World, eval_source: string, count: int, verify: bool, expected: v.Value) -> (i64, bool) {
 	start := time.tick_now()
-	_ = r.world_call(world, "bench", nil)
-	return i64(time.tick_diff(start, time.tick_now()))
+	for _ in 0..<count {
+		outcome := benchmark_call(world, eval_source)
+		if outcome.kind != .Complete {
+			fmt.eprintf("FAIL timed invocation: %s\n", outcome.message)
+			return 0, false
+		}
+		if verify && !v.value_eq(outcome.value, expected) {
+			fmt.eprintln("FAIL timed invocation: result changed")
+			return 0, false
+		}
+	}
+	return i64(time.tick_diff(start, time.tick_now())), true
 }

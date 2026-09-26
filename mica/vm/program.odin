@@ -8,11 +8,12 @@
 // This is an Odin-first design; it does not mirror the Rust opcode set.
 package vm
 
+import v "../var"
 import "core:fmt"
 import "core:mem"
+import "core:mem/virtual"
 import "core:strings"
 import "core:sync"
-import v "../var"
 
 Op :: enum u8 {
 	// Load_Const: a = dst register, b = constant index.
@@ -237,6 +238,15 @@ Callable_Info :: struct {
 }
 
 Program :: struct {
+	registry:                          ^Program_Registry,
+	serial:                            u64,
+	artifact:                          v.Value,
+	references:                        int,
+	installed:                         bool,
+	has_callable:                      bool,
+	storage_allocator:                 mem.Allocator,
+	storage_arena:                     ^virtual.Arena,
+	arena_allocator:                   mem.Allocator,
 	callables_mutex: sync.Mutex,
 	callables:       [dynamic]Callable_Info,
 	code:      []Instruction,
@@ -531,8 +541,15 @@ builder_build :: proc(builder: ^Builder, alloc: mem.Allocator) -> ^Program {
 }
 
 program_destroy :: proc(program: ^Program, alloc: mem.Allocator) {
+	if program.storage_arena != nil {
+		arena, owner := program.storage_arena, program.arena_allocator
+		virtual.arena_destroy(arena)
+		free(arena, owner)
+		return
+	}
 	for callable in program.callables {
 		if callable.captures != nil {
+			for capture in callable.captures {v.value_deep_free(alloc, capture)}
 			free(raw_data(callable.captures), alloc)
 		}
 	}

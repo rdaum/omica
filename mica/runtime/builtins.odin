@@ -30,7 +30,9 @@ Builtin_Spec :: struct {
 // calling instruction.
 @(private)
 runtime_builtins := [?]Builtin_Spec {
-	{"make_identity", 1, builtin_make_identity},
+	{"make_identity", -1, builtin_make_identity},
+	{"compile", -1, builtin_compile},
+	{"install_source", -1, builtin_install_source},
 	{"destroy_identity", 1, builtin_destroy_identity},
 	{"make_relation", -1, builtin_make_relation},
 	{"make_functional_relation", -1, builtin_make_functional_relation},
@@ -171,32 +173,34 @@ install_builtin_names :: proc(ctx: ^c.Compile_Context) {
 	}
 }
 
+primitive_identities :: [?]struct {
+	name: string,
+	id:   v.Identity,
+} {
+	{"bool", v.BOOL_PROTOTYPE},
+	{"integer", v.INTEGER_PROTOTYPE},
+	{"float", v.FLOAT_PROTOTYPE},
+	{"identity", v.IDENTITY_PROTOTYPE},
+	{"symbol", v.SYMBOL_PROTOTYPE},
+	{"error_code", v.ERROR_CODE_PROTOTYPE},
+	{"string", v.STRING_PROTOTYPE},
+	{"bytes", v.BYTES_PROTOTYPE},
+	{"list", v.LIST_PROTOTYPE},
+	{"map", v.MAP_PROTOTYPE},
+	{"range", v.RANGE_PROTOTYPE},
+	{"error", v.ERROR_PROTOTYPE},
+	{"capability", v.CAPABILITY_PROTOTYPE},
+	{"frob", v.FROB_PROTOTYPE},
+	{"function", v.FUNCTION_PROTOTYPE},
+	{"relation", v.RELATION_PROTOTYPE},
+}
+
 // Primitive prototype identities such as `#string` and `#identity` are always
 // available to source, independent of any `make_identity` declarations.
 @(private)
 install_primitive_identities :: proc(ctx: ^c.Compile_Context) {
-	prototypes := [?]struct {
-		name: string,
-		id:   v.Identity,
-	} {
-		{"bool", v.BOOL_PROTOTYPE},
-		{"integer", v.INTEGER_PROTOTYPE},
-		{"float", v.FLOAT_PROTOTYPE},
-		{"identity", v.IDENTITY_PROTOTYPE},
-		{"symbol", v.SYMBOL_PROTOTYPE},
-		{"error_code", v.ERROR_CODE_PROTOTYPE},
-		{"string", v.STRING_PROTOTYPE},
-		{"bytes", v.BYTES_PROTOTYPE},
-		{"list", v.LIST_PROTOTYPE},
-		{"map", v.MAP_PROTOTYPE},
-		{"range", v.RANGE_PROTOTYPE},
-		{"error", v.ERROR_PROTOTYPE},
-		{"capability", v.CAPABILITY_PROTOTYPE},
-		{"frob", v.FROB_PROTOTYPE},
-		{"function", v.FUNCTION_PROTOTYPE},
-		{"relation", v.RELATION_PROTOTYPE},
-	}
-	for prototype in prototypes {
+
+	for prototype in primitive_identities {
 		ctx.identities[prototype.name] = v.value_identity(prototype.id)
 	}
 }
@@ -1475,7 +1479,6 @@ rule_active_builtin :: proc(
 	}
 	return v.value_bool(true), true
 }
-
 
 
 // Decodes a base64url byte literal (`b"3q2-7w=="`) at execution time. The
