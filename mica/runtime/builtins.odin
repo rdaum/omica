@@ -32,8 +32,8 @@ Builtin_Spec :: struct {
 runtime_builtins := [?]Builtin_Spec {
 	{"make_identity", 1, builtin_make_identity},
 	{"destroy_identity", 1, builtin_destroy_identity},
-	{"make_relation", 2, builtin_relation},
-	{"make_functional_relation", 3, builtin_relation},
+	{"make_relation", -1, builtin_make_relation},
+	{"make_functional_relation", -1, builtin_make_functional_relation},
 	// Variadic: the third argument is the conflict policy.
 	{"make_buffer", -1, builtin_make_buffer},
 	{"buffer_insert", 3, builtin_buffer_insert},
@@ -323,8 +323,7 @@ actor_assumption_allowed :: proc(state: ^vm.VM, actor: v.Identity) -> bool {
 	if k.authority_can_grant(state.authority) {
 		return true
 	}
-	env := builtin_env(state)
-	relation, found := env.ctx.relations["session/CanAssumeActor"]
+	relation, found := runtime_relation_named(state, "session/CanAssumeActor")
 	if !found || state.transaction == nil {
 		return false
 	}
@@ -1337,7 +1336,7 @@ capability_target_argument :: proc(
 				vm.vm_set_error(state, "E_TYPE", "capability target is unknown")
 				return .All, nil, nil, false
 			}
-			relation, found := env.ctx.relations[name]
+			relation, found := runtime_relation_named(state, name)
 			if !found {
 				vm.vm_set_error(state, "E_INVARG", "capability target is not a relation")
 				return .All, nil, nil, false
@@ -1575,7 +1574,7 @@ builtin_rules :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 		return builtin_error(state, "E_INVARG", "rules expects a named relation symbol")
 	}
 	env := builtin_env(state)
-	relation_id, known := env.ctx.relations[name]
+	relation_id, known := runtime_relation_named(state, name)
 	if !known {
 		return builtin_error(
 			state,
@@ -1674,7 +1673,7 @@ builtin_fileout_rules :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool)
 		if !has_name {
 			return builtin_error(state, "E_INVARG", "fileout_rules expects a named relation symbol")
 		}
-		known_id, known := env.ctx.relations[name]
+		known_id, known := runtime_relation_named(state, name)
 		if !known {
 			return builtin_error(
 				state,
@@ -1823,7 +1822,7 @@ builtin_subscribe_changes :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, b
 		if !relation_name_ok {
 			return builtin_error(state, "E_INVARG", "unknown subscription relation")
 		}
-		relation, found := env.ctx.relations[relation_name]
+		relation, found := runtime_relation_named(state, relation_name)
 		if !found {
 			return builtin_error(state, "E_INVARG", "unknown subscription relation")
 		}
@@ -2793,7 +2792,7 @@ builtin_relation_literal :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bo
 }
 
 // Asserts or retracts one row of a relation addressed by name, resolving the
-// relation id at execution time through the world's compile context. This is
+// relation id at execution time through the task catalogue. This is
 // the runtime-resolution path for relation writes: an emitted program names
 // the relation instead of baking a kernel id, so the same artifact stays
 // valid across worlds whose relation ids differ.
@@ -2817,8 +2816,7 @@ builtin_relation_write :: proc(
 	if state.transaction == nil {
 		return builtin_error(state, "E_NO_TRANSACTION", "relation write has no transaction")
 	}
-	env := builtin_env(state)
-	relation, known := env.ctx.relations[name]
+	relation, known := runtime_relation_named(state, name)
 	if !known {
 		return builtin_error(
 			state,

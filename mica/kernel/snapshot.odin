@@ -1,11 +1,8 @@
 // Snapshot-published world state.
 //
-// A snapshot is immutable after publication. All snapshot data - values,
-// tuples, blocks, metadata, and derived rows - lives in the kernel's shared
-// committed store, so a snapshot holds no arena of its own. Each snapshot
-// retains its parent so values inherited along the commit chain stay alive.
-// Snapshots are reference-counted; the last release frees the header only,
-// because the committed store outlives every snapshot.
+// Snapshots own their arrays and derived rows, and retain shared data blocks.
+// Catalogue metadata contains immutable slices with kernel lifetime, so later
+// snapshots can copy entries without retaining their parent snapshot.
 package kernel
 
 import v "../var"

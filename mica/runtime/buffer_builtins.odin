@@ -32,8 +32,7 @@ buffer_relation_arg :: proc(state: ^vm.VM, value: v.Value) -> (k.Relation_ID, bo
 		vm.vm_set_error(state, "E_INVARG", "unknown buffer name")
 		return 0, false
 	}
-	env := builtin_env(state)
-	relation, known := env.ctx.relations[name]
+	relation, known := runtime_relation_named(state, name)
 	if !known {
 		vm.vm_set_error(
 			state,
@@ -118,7 +117,6 @@ builtin_make_buffer :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 		vm.vm_set_error(state, "E_NO_TRANSACTION", "make_buffer requires a task transaction")
 		return v.Value(0), false
 	}
-	env := builtin_env(state)
 
 	// Re-declaring an existing buffer adopts it. A durable world re-runs its
 	// fileins on boot, so declarations must be idempotent.
@@ -141,7 +139,6 @@ builtin_make_buffer :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 			)
 			return v.Value(0), false
 		}
-		env.ctx.relations[name] = u32(existing.id)
 		return v.value_bool(true), true
 	}
 
@@ -178,12 +175,11 @@ builtin_make_buffer :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 		kind = conflict,
 	}
 	metadata.durability = durability
-	relation, create_error := k.transaction_create_relation(state.transaction, metadata)
+	_, create_error := k.transaction_create_relation(state.transaction, metadata)
 	if create_error != .None {
 		vm.vm_set_error(state, "E_WRITE", "make_buffer could not create the buffer")
 		return v.Value(0), false
 	}
-	env.ctx.relations[name] = u32(relation)
 	return v.value_bool(true), true
 }
 
