@@ -10,7 +10,6 @@ package web
 
 import "base:runtime"
 import "core:mem"
-import "core:mem/virtual"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -613,73 +612,72 @@ editor_handle_input_batch :: proc(
 @(private)
 editor_pump_proc :: proc(data: rawptr) {
 	context = runtime.default_context()
-	temp_arena: virtual.Arena
-	if err := virtual.arena_init_growing(&temp_arena); err == nil {
-		context.temp_allocator = virtual.arena_allocator(&temp_arena)
-		defer virtual.arena_destroy(&temp_arena)
-	}
-	editor := (^Editor)(data)
-	for {
-		session: ^Editor_Session
-		input: Editor_Input
-		sync.mutex_lock(&editor.lock)
-		stopping := editor.stopping
-		if !stopping {
-			for _, candidate in editor.sessions {
-				sync.mutex_lock(&candidate.lock)
-				if !candidate.processing && len(candidate.inputs) > 0 {
-					session = candidate
-					input = candidate.inputs[0]
-					ordered_remove(&candidate.inputs, 0)
-					candidate.processing = true
-					sync.mutex_unlock(&candidate.lock)
-					break
-				}
-				sync.mutex_unlock(&candidate.lock)
-			}
-		}
-		if !stopping && session == nil {
-			sync.cond_wait(&editor.cond, &editor.lock)
-		}
-		sync.mutex_unlock(&editor.lock)
-		if stopping {
-			return
-		}
-		if session == nil {
-			continue
-		}
+	scratch_loop(editor_pump_step, data)
+}
 
-		body := editor_execute_input(editor, session, &input)
-		sync.mutex_lock(&session.lock)
-		append(
-			&session.results,
-			Editor_Result {
-				sequence = input.sequence,
-				body = strings.clone(body, session.allocator),
-			},
-		)
-		if len(session.results) > EDITOR_RESULT_LIMIT {
-			delete(session.results[0].body, session.allocator)
-			ordered_remove(&session.results, 0)
-		}
-		session.next_sequence = input.sequence + 1
-		session.pending_bytes -= len(input.text)
-		// Store before publishing, and publish before another worker can take
-		// the next item from this session. This preserves per-session order.
-		if editor.sync_host != nil {
-			if stream := sync_host_ensure_session(
-				editor.sync_host,
-				session.session_id,
-				session.actor,
-			); stream != nil {
-				_ = sync_session_post_editor(stream, body)
+// Runs at most one queued input. Reports false once the editor is stopping.
+@(private)
+editor_pump_step :: proc(data: rawptr) -> bool {
+	editor := (^Editor)(data)
+	session: ^Editor_Session
+	input: Editor_Input
+	sync.mutex_lock(&editor.lock)
+	stopping := editor.stopping
+	if !stopping {
+		for _, candidate in editor.sessions {
+			sync.mutex_lock(&candidate.lock)
+			if !candidate.processing && len(candidate.inputs) > 0 {
+				session = candidate
+				input = candidate.inputs[0]
+				ordered_remove(&candidate.inputs, 0)
+				candidate.processing = true
+				sync.mutex_unlock(&candidate.lock)
+				break
 			}
+			sync.mutex_unlock(&candidate.lock)
 		}
-		session.processing = false
-		sync.mutex_unlock(&session.lock)
-		delete(input.text, session.allocator)
-		free_all(context.temp_allocator)
 	}
+	if !stopping && session == nil {
+		sync.cond_wait(&editor.cond, &editor.lock)
+	}
+	sync.mutex_unlock(&editor.lock)
+	if stopping {
+		return false
+	}
+	if session == nil {
+		return true
+	}
+
+	body := editor_execute_input(editor, session, &input)
+	sync.mutex_lock(&session.lock)
+	append(
+		&session.results,
+		Editor_Result {
+			sequence = input.sequence,
+			body = strings.clone(body, session.allocator),
+		},
+	)
+	if len(session.results) > EDITOR_RESULT_LIMIT {
+		delete(session.results[0].body, session.allocator)
+		ordered_remove(&session.results, 0)
+	}
+	session.next_sequence = input.sequence + 1
+	session.pending_bytes -= len(input.text)
+	// Store before publishing, and publish before another worker can take
+	// the next item from this session. This preserves per-session order.
+	if editor.sync_host != nil {
+		if stream := sync_host_ensure_session(
+			editor.sync_host,
+			session.session_id,
+			session.actor,
+		); stream != nil {
+			_ = sync_session_post_editor(stream, body)
+		}
+	}
+	session.processing = false
+	sync.mutex_unlock(&session.lock)
+	delete(input.text, session.allocator)
+	return true
 }
 
 @(private)

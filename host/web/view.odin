@@ -8,9 +8,7 @@ package web
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
-import "core:mem/virtual"
 import "core:sync"
-import "core:thread"
 import "core:time"
 import dom "../../mica/dom"
 import k "../../mica/kernel"
@@ -375,36 +373,29 @@ sync_dependency_relation :: proc(
 @(private)
 sync_pump_proc :: proc(data: rawptr) {
 	context = runtime.default_context()
-	// A private temporary scratch arena for this long-lived thread. The pump
-	// allocates its session snapshot and render list from
-	// `context.temp_allocator` on every iteration; a dedicated arena keeps
-	// that churn off every other thread's temporary state and releases it
-	// when the pump stops.
-	temp_arena: virtual.Arena
-	if err := virtual.arena_init_growing(&temp_arena); err == nil {
-		context.temp_allocator = virtual.arena_allocator(&temp_arena)
-		defer virtual.arena_destroy(&temp_arena)
-	}
+	scratch_loop(sync_pump_step, data)
+}
+
+// Pumps every session once, then waits for the next round. Reports false once
+// the host is stopping.
+@(private)
+sync_pump_step :: proc(data: rawptr) -> bool {
 	host := (^Sync_Host)(data)
-	for {
-		sync.mutex_lock(&host.lock)
-		stopping := host.stopping
-		sessions: [dynamic]^Sync_Session
-		sessions = make([dynamic]^Sync_Session, context.temp_allocator)
-		for _, session in host.sessions {
-			append(&sessions, session)
-		}
-		sync.mutex_unlock(&host.lock)
-		if stopping {
-			delete(sessions)
-			return
-		}
-		for session in sessions {
-			sync_pump_session(host, session)
-		}
-		delete(sessions)
-		time.sleep(25 * time.Millisecond)
+	sync.mutex_lock(&host.lock)
+	stopping := host.stopping
+	sessions := make([dynamic]^Sync_Session, context.temp_allocator)
+	for _, session in host.sessions {
+		append(&sessions, session)
 	}
+	sync.mutex_unlock(&host.lock)
+	if stopping {
+		return false
+	}
+	for session in sessions {
+		sync_pump_session(host, session)
+	}
+	time.sleep(25 * time.Millisecond)
+	return true
 }
 
 @(private)
