@@ -528,11 +528,23 @@ run_integration() {
     problem "integration:filein-eval: expected a boolean, got '${out}'"
   fi
 
+  # A filein given to a store that already holds a world is not loaded (the
+  # world boots from the store); filein must say so and fail rather than print
+  # "loaded" for a file it never ran.
+  printf 'make_relation(:Extra, 1)\n' > "${tmp}/extra.mica"
+  if capture "${tmp}/extra.log" "${test_timeout}" "${filein}" --store "${tmp}/db" \
+    "${tmp}/extra.mica"; then
+    problem "integration:filein-booted-store-rejects-files: exited 0"
+  elif grep -q "was not loaded" "${tmp}/extra.log" && ! grep -q "^loaded" "${tmp}/extra.log"; then
+    pass "integration:filein-booted-store-rejects-files"
+  else
+    problem "integration:filein-booted-store-rejects-files: $(tr '\n' ' ' < "${tmp}/extra.log")"
+  fi
+
   # A checkpoint after a store boot must complete (regression: reconstruction
   # advanced the version without writing the log, so the checkpoint waited for
   # records that never arrived).
-  if run_timeout 30 "${filein}" --store "${tmp}/db" \
-    --checkpoint apps/examples/equipment-service.mica >/dev/null 2>&1; then
+  if run_timeout 30 "${filein}" --store "${tmp}/db" --checkpoint >/dev/null 2>&1; then
     pass "integration:checkpoint-after-boot"
   else
     problem "integration:checkpoint-after-boot (timeout or error)"

@@ -204,6 +204,19 @@ main :: proc() {
 		fmt.eprintf("failed: %s\n", start.message)
 		os.exit(1)
 	}
+	// A store that already holds a world boots from it and ignores the given
+	// files. Say so and fail, rather than report a file as loaded that never ran.
+	if world.booted && len(paths) > 0 {
+		for path in paths {
+			fmt.eprintf(
+				"failed: %s was not loaded: the store at %s already holds a world, which boots from the store and ignores new fileins\n",
+				path,
+				store_path,
+			)
+		}
+		r.world_destroy(world)
+		os.exit(1)
+	}
 	ok := true
 	if world.entry != 0 {
 		outcome := r.world_wait(world, world.entry)

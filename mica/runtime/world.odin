@@ -112,6 +112,9 @@ World :: struct {
 	store:             ^s.Store,
 	entry:             Task_ID,
 	started:           bool,
+	// Set when the world booted from a non-empty store. The sources passed to
+	// `world_start` were then not loaded; the store's own units were.
+	booted:            bool,
 	// External host bridge. Stream workers are tracked here so world shutdown
 	// can join them before the scheduler they deliver through is destroyed.
 	external_handler:  External_Handler,
@@ -174,6 +177,7 @@ world_start :: proc(
 
 	if world.store != nil &&
 	   (s.store_durable_version(world.store) > 0 || s.store_checkpoint_version(world.store) > 0) {
+		world.booted = true
 		result := world_boot(world, world.store, config)
 		if !result.ok {
 			world_destroy(world)
