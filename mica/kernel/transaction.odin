@@ -227,6 +227,8 @@ transaction_create_relation :: proc(
 	Relation_ID,
 	Kernel_Error,
 ) {
+	if transaction.read_only {return 0, .Read_Only}
+
 	if err := validate_relation_metadata(metadata); err != .None {
 		return 0, err
 	}
@@ -254,6 +256,7 @@ transaction_create_relation :: proc(
 	staged := metadata_clone(transaction.allocator, metadata)
 	staged.id = id
 	append(&transaction.catalog_changes, Staged_Catalog_Change{kind = .Create, metadata = staged})
+	transaction.derived_valid = false
 	return id, .None
 }
 
@@ -656,7 +659,7 @@ transaction_tuple_for_key :: proc(
 	v.Tuple,
 	bool,
 ) {
-	metadata, ok := snapshot_relation_metadata(transaction.base, relation)
+	metadata, ok := transaction_relation_metadata(transaction, relation)
 	if !ok {
 		return nil, false
 	}
@@ -1042,7 +1045,12 @@ transaction_build_candidate :: proc(
 				transaction.catalog_conflict = true
 				return fork
 			}
-			snapshot_add_relation(fork, metadata_clone(fork.allocator, change.metadata))
+			// Later snapshots shallow-copy catalogue metadata. Its nested slices
+			// must outlive this candidate and the transaction staging arena.
+			sync.mutex_lock(&kernel.catalog_lock)
+			owned_metadata := metadata_clone(kernel.world_allocator, change.metadata)
+			sync.mutex_unlock(&kernel.catalog_lock)
+			snapshot_add_relation(fork, owned_metadata)
 		case .Kill:
 			// Tombstone the entry in the candidate and release its content.
 			for &metadata in fork.catalog {

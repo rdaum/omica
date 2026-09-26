@@ -708,15 +708,26 @@ kernel_publish_group :: proc(kernel: ^Kernel, batch: []^Commit_Entry) {
 		for entry in batch {
 			collides := false
 			for change in entry.transaction.catalog_changes {
-				if change.kind != .Create {
-					continue
-				}
-				if _, exists := snapshot_relation_metadata_named(merged, change.metadata.name);
-				   exists {
+				if change.kind != .Create {continue}
+				_, name_exists := snapshot_relation_metadata_named(merged, change.metadata.name)
+				if name_exists || snapshot_has_relation(merged, change.metadata.id) {
 					collides = true
 					break
 				}
+				// Accepted candidates have not been applied to merged yet. Check
+				// them too, so two entries in one group cannot claim the same name.
+				for accepted in publishable {
+					for other in accepted.transaction.catalog_changes {
+						if other.kind == .Create && (other.metadata.name == change.metadata.name || other.metadata.id == change.metadata.id) {
+							collides = true
+							break
+						}
+					}
+					if collides {break}
+				}
+				if collides {break}
 			}
+
 			if !collides {
 				append(&publishable, entry)
 			}
@@ -766,7 +777,8 @@ kernel_publish_group :: proc(kernel: ^Kernel, batch: []^Commit_Entry) {
 						entry.candidate,
 						change.metadata.id,
 					); found {
-						snapshot_add_relation(merged, metadata_clone(merged.allocator, metadata))
+						// Candidate metadata already has kernel lifetime.
+						snapshot_add_relation(merged, metadata)
 					}
 				case .Kill:
 					for &metadata in merged.catalog {

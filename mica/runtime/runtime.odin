@@ -16,7 +16,6 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
-import "core:strconv"
 import "core:strings"
 import "core:sync"
 
@@ -435,6 +434,20 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 	}
 	tx := k.kernel_begin(env.kernel)
 	defer k.transaction_destroy(&tx)
+	result := stage_relation_facts(env, &tx, relations)
+	if !result.ok {return result}
+
+	committed, commit_err := k.transaction_commit(&tx)
+	if commit_err != k.Kernel_Error.None {
+		return catalog_error(env, "Relation", commit_err)
+	}
+	k.snapshot_release(committed)
+	return Run_Result{ok = true, message = "loaded"}
+}
+
+// Stages reflection facts in the same transaction as their catalogue entries.
+@(private)
+stage_relation_facts :: proc(env: ^Builtin_Env, tx: ^k.Transaction, relations: []k.Relation_Metadata) -> Run_Result {
 	for metadata in relations {
 		identity, identity_ok := v.value_identity_raw(u64(metadata.id))
 		if !identity_ok {
@@ -445,14 +458,14 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 			return Run_Result{ok = false, message = "relation arity is out of range"}
 		}
 		if err := k.transaction_assert(
-			&tx,
+			tx,
 			k.SYSTEM_RELATION_ID,
 			v.tuple_new(context.temp_allocator, []v.Value{identity}),
 		); err != k.Kernel_Error.None {
 			return catalog_error(env, "Relation", err)
 		}
 		if err := k.transaction_assert(
-			&tx,
+			tx,
 			k.SYSTEM_RELATION_NAME_ID,
 			v.tuple_new(
 				context.temp_allocator,
@@ -462,7 +475,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 			return catalog_error(env, "RelationName", err)
 		}
 		if err := k.transaction_assert(
-			&tx,
+			tx,
 			k.SYSTEM_ARITY_ID,
 			v.tuple_new(context.temp_allocator, []v.Value{identity, arity_value}),
 		); err != k.Kernel_Error.None {
@@ -473,7 +486,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 			durability_name = "volatile"
 		}
 		if err := k.transaction_assert(
-			&tx,
+			tx,
 			k.SYSTEM_RELATION_DURABILITY_ID,
 			v.tuple_new(
 				context.temp_allocator,
@@ -488,7 +501,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 				continue
 			}
 			if err := k.transaction_assert(
-				&tx,
+				tx,
 				k.SYSTEM_ARGUMENT_NAME_ID,
 				v.tuple_new(
 					context.temp_allocator,
@@ -507,7 +520,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 		case .Set:
 		}
 		if err := k.transaction_assert(
-			&tx,
+			tx,
 			k.SYSTEM_CONFLICT_POLICY_ID,
 			v.tuple_new(
 				context.temp_allocator,
@@ -519,7 +532,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 		if metadata.conflict.kind == .Functional {
 			for position, slot in metadata.conflict.key_positions {
 				if err := k.transaction_assert(
-					&tx,
+					tx,
 					k.SYSTEM_FUNCTIONAL_KEY_ID,
 					v.tuple_new(
 						context.temp_allocator,
@@ -542,7 +555,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 				return Run_Result{ok = false, message = "index identity is out of range"}
 			}
 			if err := k.transaction_assert(
-				&tx,
+				tx,
 				k.SYSTEM_INDEX_ID,
 				v.tuple_new(context.temp_allocator, []v.Value{identity, index_value}),
 			); err != k.Kernel_Error.None {
@@ -562,7 +575,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 			}
 			for position, slot in positions {
 				if err := k.transaction_assert(
-					&tx,
+					tx,
 					k.SYSTEM_INDEX_POSITION_ID,
 					v.tuple_new(
 						context.temp_allocator,
@@ -577,7 +590,7 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 				}
 			}
 			if err := k.transaction_assert(
-				&tx,
+				tx,
 				k.SYSTEM_INDEX_STORAGE_KIND_ID,
 				v.tuple_new(
 					context.temp_allocator,
@@ -588,11 +601,6 @@ assert_relation_facts :: proc(env: ^Builtin_Env, relations: []k.Relation_Metadat
 			}
 		}
 	}
-	committed, commit_err := k.transaction_commit(&tx)
-	if commit_err != k.Kernel_Error.None {
-		return catalog_error(env, "Relation", commit_err)
-	}
-	k.snapshot_release(committed)
 	return Run_Result{ok = true, message = "loaded"}
 }
 
@@ -846,17 +854,10 @@ prescan_file :: proc(
 	declarations: ^Declarations,
 ) -> Run_Result {
 	ctx := env.ctx
+	tx := k.kernel_begin(env.kernel)
+	defer k.transaction_destroy(&tx)
 	created_metadata: [dynamic]k.Relation_Metadata
 	defer delete(created_metadata)
-	// Functional key slices are referenced by `created_metadata` until the
-	// catalog facts are asserted, so they are released at the end.
-	owned_functional_keys: [dynamic][dynamic]u16
-	defer {
-		for keys in owned_functional_keys {
-			delete(keys)
-		}
-		delete(owned_functional_keys)
-	}
 	for item in ast.items {
 		expression: ^c.Expr
 		#partial switch matched in item {
@@ -902,81 +903,40 @@ prescan_file :: proc(
 			}
 
 		case "make_relation", "make_functional_relation":
-			if len(call.args) < 2 {
-				continue
+			args := make([]v.Value, len(call.args), context.temp_allocator)
+			constant := true
+			for arg, i in call.args {
+				value, ok := relation_declaration_literal(arg.expr)
+				if !ok {constant = false; break}
+				args[i] = value
 			}
-			relation_name := symbol_text(call.args[0].expr)
-			arity := int_argument(call.args[1].expr)
-			if relation_name == "" || arity <= 0 {
-				continue
-			}
-			if _, exists := ctx.relations[relation_name]; exists {
-				continue
-			}
-
-			metadata := k.relation_metadata(
-				k.Relation_ID(declarations.next_relation),
-				v.symbol_intern(relation_name),
-				u16(arity),
-			)
-			functional_keys: [dynamic]u16
-			if declared == "make_functional_relation" && len(call.args) >= 3 {
-				if list, is_list := call.args[2].expr^.(c.List_Literal); is_list {
-					for element in list.elements {
-						position := int_argument(element)
-						if position >= 0 {
-							append(&functional_keys, u16(position))
-						}
-					}
-				}
-				metadata.conflict = k.conflict_functional(functional_keys[:])
-			}
-			durability_index := 2
-			if declared == "make_functional_relation" {
-				durability_index = 3
-			}
-			if len(call.args) > durability_index {
-				metadata.durability = relation_durability_argument(
-					call.args[durability_index].expr,
-				)
-			}
-
-			created, create_err := k.kernel_create_relation(env.kernel, metadata)
-			if create_err != k.Kernel_Error.None {
-				return Run_Result {
-					ok = false,
-					message = fmt.aprintf(
-						"cannot create relation %s: %v",
-						relation_name,
-						create_err,
-						allocator = env.allocator,
-					),
-				}
-			}
-			k.snapshot_release(created)
-			ctx.relations[relation_name] = declarations.next_relation
-			append(&created_metadata, metadata)
-			if metadata.conflict.kind == .Functional {
-				append(&owned_functional_keys, functional_keys)
-			} else {
-				delete(functional_keys)
-			}
-
-			if metadata.conflict.kind == .Functional {
-				key_positions := make([]u16, len(metadata.conflict.key_positions), env.allocator)
-				copy(key_positions, metadata.conflict.key_positions)
-				env.fields[lower_first(relation_name, env.allocator)] = Field_Info {
-					relation      = k.Relation_ID(declarations.next_relation),
-					key_positions = key_positions,
-				}
-			}
-			declarations.next_relation += 1
+			// Computed arguments execute in the entry task, after compilation.
+			if !constant {continue}
+			metadata, _, message := relation_constructor_metadata(args, declared == "make_functional_relation")
+			if message != "" {return Run_Result{message = message}}
+			metadata.id = k.Relation_ID(declarations.next_relation)
+			actual, result := ensure_relation(env, &tx, metadata)
+			if !result.ok {return result}
+			if actual.id == metadata.id {declarations.next_relation += 1}
+			append(&created_metadata, actual)
 		}
 	}
-	fact_result := assert_relation_facts(env, created_metadata[:])
-	if !fact_result.ok {
-		return fact_result
+	committed, err := k.transaction_commit(&tx)
+	if err != .None {return catalog_error(env, "Relation", err)}
+	k.snapshot_release(committed)
+	for metadata in created_metadata {
+		name, _ := v.symbol_name(metadata.name)
+		ctx.relations[name] = u32(metadata.id)
+		if metadata.conflict.kind == .Functional {
+			field := lower_first(name, context.temp_allocator)
+			if _, exists := env.fields[field]; !exists {
+				keys := make([]u16, len(metadata.conflict.key_positions), env.allocator)
+				copy(keys, metadata.conflict.key_positions)
+				env.fields[lower_first(name, env.allocator)] = Field_Info{relation = metadata.id, key_positions = keys}
+			}
+		}
 	}
+
 	return Run_Result{ok = true, message = "loaded"}
 }
 
@@ -1072,11 +1032,6 @@ builtin_make_identity :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool)
 		return v.Value(0), false
 	}
 	return value, true
-}
-
-@(private)
-builtin_relation :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
-	return v.value_empty_relation(), true
 }
 
 // Retracts every stored fact whose first column is the identity. This mirrors
@@ -1206,7 +1161,6 @@ builtin_require :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 
 @(private)
 builtin_set_field :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
-	env := builtin_env(state)
 	if state.transaction == nil {
 		vm.vm_set_error(state, "E_NO_TRANSACTION", "field write outside a transaction")
 		return v.Value(0), false
@@ -1225,7 +1179,7 @@ builtin_set_field :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 	// Field declarations register the lowercased last path segment
 	// (`session/SteeringQueue` is stored as `session/steeringQueue`), so the
 	// access does the same normalization.
-	info, found := env.fields[lower_first(name, context.temp_allocator)]
+	info, found := transaction_field(state, name)
 	if !found || len(info.key_positions) == 0 {
 		vm.vm_set_error(
 			state,
@@ -1259,9 +1213,7 @@ builtin_set_field :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 		key_values,
 	)
 
-	current := k.kernel_snapshot(env.kernel)
-	defer k.snapshot_release(current)
-	metadata, metadata_found := k.snapshot_relation_metadata(current, info.relation)
+	metadata, metadata_found := k.transaction_relation_metadata(state.transaction, info.relation)
 	if !metadata_found || metadata.arity != 2 {
 		vm.vm_set_error(state, "E_FIELD", "only binary functional relations are supported")
 		return v.Value(0), false
@@ -1286,7 +1238,6 @@ builtin_set_field :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 
 @(private)
 builtin_get_field :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
-	env := builtin_env(state)
 	if state.transaction == nil {
 		vm.vm_set_error(state, "E_NO_TRANSACTION", "field read outside a transaction")
 		return v.Value(0), false
@@ -1321,7 +1272,7 @@ builtin_get_field :: proc(state: ^vm.VM, args: []v.Value) -> (v.Value, bool) {
 			return option_none_value(state.allocator), true
 		}
 	}
-	info, found := env.fields[lower_first(name, context.temp_allocator)]
+	info, found := transaction_field(state, name)
 	if !found || len(info.key_positions) != 1 || info.key_positions[0] != 0 {
 		vm.vm_set_error(
 			state,
@@ -1363,28 +1314,6 @@ symbol_text :: proc(expr: ^c.Expr) -> string {
 		return symbol.name[1:len(symbol.name) - 1]
 	}
 	return symbol.name
-}
-
-// Reads an optional `:durable` or `:volatile` declaration argument.
-@(private)
-relation_durability_argument :: proc(expr: ^c.Expr) -> k.Relation_Durability {
-	if symbol_text(expr) == "volatile" {
-		return .Volatile
-	}
-	return .Durable
-}
-
-@(private)
-int_argument :: proc(expr: ^c.Expr) -> int {
-	literal, is_literal := expr^.(c.Int_Literal)
-	if !is_literal {
-		return -1
-	}
-	value, ok := strconv.parse_i64(literal.text)
-	if !ok {
-		return -1
-	}
-	return int(value)
 }
 
 @(private)

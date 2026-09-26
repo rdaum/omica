@@ -4370,7 +4370,7 @@ join_name :: proc(name: Name, allocator: mem.Allocator) -> string {
 	return strings.to_string(builder)
 }
 
-@(private)
+// Decodes string and symbol literals for both emission and filein declarations.
 unquote_string :: proc(text: string, allocator: mem.Allocator) -> string {
 	if len(text) < 2 || text[0] != '"' {
 		return text

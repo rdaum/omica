@@ -403,7 +403,19 @@ world_eval_submit :: proc(
 	program_ast := c.Program_AST {
 		items = items[:],
 	}
-	compiled := c.compile_program(&program_ast, &world.ctx, allocator)
+	// Compilation observes one committed catalogue, without mutating maps
+	// shared with running tasks. Staged creations remain private to their task.
+	catalog := k.kernel_snapshot(world.kernel)
+	defer k.snapshot_release(catalog)
+	compile_ctx := world.ctx
+	compile_ctx.relations = make(map[string]u32, allocator)
+	defer delete(compile_ctx.relations)
+	for metadata in catalog.catalog {
+		if metadata.tombstoned || metadata.storage != .Tuple {continue}
+		name, ok := v.symbol_name(metadata.name)
+		if ok {compile_ctx.relations[name] = u32(metadata.id)}
+	}
+	compiled := c.compile_program(&program_ast, &compile_ctx, allocator)
 	if len(compiled.errors) > 0 {
 		return 0, Task_Outcome{kind = .Aborted, message = compiled.errors[0].message}, false
 	}

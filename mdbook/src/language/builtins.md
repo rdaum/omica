@@ -228,9 +228,25 @@ See [Relations](./relations.md#relation-value-algebra) for heading and duplicate
 | `fileout_rules([:Relation])`                                 | active rule source                         |
 | `tasks()`                                                    | current task snapshots                     |
 
-The optional durability symbol is `:durable` or `:volatile`. Definition, destruction, and
-rule-disabling operations require administrative authority. `destroy_identity` also removes the
-identity's `NamedIdentity` name binding.
+Relation constructors accept computed arguments, including calls inside verbs. They return the
+relation identity. Arity must be an integer from 0 through 65535. Functional keys must be a list
+of distinct, zero-based positions within that arity. An empty key permits at most one tuple.
+The optional durability symbol is `:durable` or `:volatile`. The default is `:durable`.
+
+A matching declaration returns the existing identity. A different arity, key list, conflict policy,
+or durability produces `E_INVARG`. Invalid argument types produce `E_TYPE`.
+
+Runtime creation requires administrative authority and a writable transaction. The schema,
+reflection facts, and initial tuples become visible together at commit. The creating task can
+use them before commit. Aborting the transaction discards all three. Concurrent creations of the
+same name conflict at commit. A fresh transaction can adopt the winning declaration.
+
+Later compilation resolves committed relation names. Creating a name during execution does not
+change earlier compilation. Filein separately prepares literal declarations before compiling their
+uses, with the same validation. Those declarations exist before the entry task executes.
+
+Definition, destruction, and rule-disabling operations require administrative authority.
+`destroy_identity` also removes the identity's `NamedIdentity` name binding.
 
 ## Runtime Context, Effects, and Coordination
 

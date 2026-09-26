@@ -1760,15 +1760,17 @@ vm_resolve_pattern_relation :: proc(state: ^VM, pattern: Scan_Pattern) -> (k.Rel
 	if pattern.relation != 0 {
 		return k.Relation_ID(pattern.relation), true
 	}
-	snapshot := state.source.snapshot
-	if snapshot == nil && state.source.transaction != nil {
-		snapshot = state.source.transaction.base
-	}
-	if snapshot == nil {
-		vm_fail(state, "E_NO_SOURCE", "relation scan has no snapshot to resolve a name")
+	metadata: k.Relation_Metadata
+	found: bool
+	if state.source.transaction != nil {
+		metadata, found = k.transaction_relation_metadata_named(state.source.transaction, pattern.relation_name)
+	} else if state.source.snapshot != nil {
+		metadata, found = k.snapshot_relation_metadata_named(state.source.snapshot, pattern.relation_name)
+	} else {
+		vm_fail(state, "E_NO_SOURCE", "relation scan has no source to resolve a name")
 		return 0, false
 	}
-	metadata, found := k.snapshot_relation_metadata_named(snapshot, pattern.relation_name)
+
 	if !found {
 		name, _ := v.symbol_name(pattern.relation_name)
 		vm_fail(
