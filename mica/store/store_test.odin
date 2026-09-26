@@ -649,6 +649,14 @@ test_checkpoint_round_trip :: proc(t: ^testing.T) {
 		store_attach(&store, &kernel)
 		create_named_relation(t, &kernel, 1, "Kept", 1, .Durable)
 		create_named_relation(t, &kernel, 2, "Gone", 1, .Volatile)
+		// Copy is derived from Kept by a rule: its rows are derived blocks and
+		// must never be written to the checkpoint as facts.
+		create_named_relation(t, &kernel, 3, "Copy", 1, .Durable)
+		x := v.symbol_intern("x")
+		rule := k.rule_new(3, []k.Term{k.term_var(x)}, []k.Rule_Body_Item{k.body_atom(k.atom_positive(1, []k.Term{k.term_var(x)}))})
+		installed, install_error := k.kernel_install_rule(&kernel, v.Identity(960), rule, "checkpoint test")
+		testing.expect_value(t, install_error, k.Kernel_Error.None)
+		k.snapshot_release(installed)
 
 		tx := k.kernel_begin(&kernel)
 		for index in 0 ..< 300 {
@@ -673,6 +681,8 @@ test_checkpoint_round_trip :: proc(t: ^testing.T) {
 			k.kernel_destroy(&kernel)
 			return
 		}
+		derived, has_derived := k.snapshot_derived_block(committed, 3)
+		testing.expect(t, has_derived && k.relation_block_len(derived) == 300)
 		k.snapshot_release(committed)
 
 		testing.expect(t, store_checkpoint(&store, &kernel))
@@ -723,6 +733,9 @@ test_checkpoint_round_trip :: proc(t: ^testing.T) {
 	testing.expect(t, store_restore(&store, &kernel))
 	testing.expect_value(t, file_relation_rows(t, &kernel, "Kept"), 301)
 	testing.expect_value(t, file_relation_rows(t, &kernel, "Gone"), 0)
+	// No rule is installed after a store-level restore, so any Copy row here
+	// would be a derived row that was persisted as a fact.
+	testing.expect_value(t, file_relation_rows(t, &kernel, "Copy"), 0)
 }
 
 @(private)

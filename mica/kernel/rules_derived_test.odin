@@ -91,27 +91,6 @@ test_rules_derived_visit_filters_and_materializes :: proc(t: ^testing.T) {
 	testing.expect(t, has_tuple(seen[:], tuple_of(must_int(1), must_int(7))))
 }
 
-@(test)
-test_derived_relations_from_is_canonical_rows :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	d := rules_derived_create(context.temp_allocator)
-	columns := [][]v.Value{{must_int(3), must_int(1), must_int(2)}}
-	rules_derived_add_columns(&d, nil, Relation_ID(9), columns, 3, context.temp_allocator)
-	scratch: virtual.Arena
-	if err := virtual.arena_init_growing(&scratch); err != nil {
-		testing.fail_now(t, "arena init failed")
-	}
-	defer virtual.arena_destroy(&scratch)
-	relations := derived_relations_from(context.temp_allocator, &d, &scratch)
-	testing.expect_value(t, len(relations), 1)
-	testing.expect_value(t, relations[0].relation, Relation_ID(9))
-	want := v.canonicalize_tuples([]v.Tuple{tuple_of(must_int(3)), tuple_of(must_int(1)), tuple_of(must_int(2))}, context.temp_allocator)
-	testing.expect_value(t, len(relations[0].tuples), len(want))
-	for row, i in relations[0].tuples {
-		testing.expect(t, v.tuple_eq(row, want[i]))
-	}
-}
-
 // A frozen result shows scans only the rows present at the freeze, while
 // deduplication still sees every row; relations first created while frozen
 // are invisible until the thaw.
@@ -280,6 +259,9 @@ test_derived_relations_from_matches_canonicalize :: proc(t: ^testing.T) {
 	}
 	rules_derived_add_columns(&d, nil, Relation_ID(1), [][]v.Value{a, b}, ROWS, context.temp_allocator)
 	rules_derived_add_columns(&d, nil, Relation_ID(2), [][]v.Value{s, a}, ROWS, context.temp_allocator)
+	// A single-column relation (the case the removed
+	// test_derived_relations_from_is_canonical_rows covered).
+	rules_derived_add_columns(&d, nil, Relation_ID(3), [][]v.Value{b}, ROWS, context.temp_allocator)
 
 	scratch: virtual.Arena
 	if err := virtual.arena_init_growing(&scratch); err != nil {
