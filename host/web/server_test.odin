@@ -2,6 +2,7 @@ package web
 
 import "base:runtime"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:net"
 import "core:os"
 import "core:strings"
@@ -19,14 +20,24 @@ server_run_worker :: proc(data: rawptr) {
 
 @(private)
 start_server :: proc(t: ^testing.T, server: ^Web_Server, routes: ^Routes) -> ^thread.Thread {
+	return start_server_with(t, server, routes_handle, routes)
+}
+
+@(private)
+start_server_with :: proc(
+	t: ^testing.T,
+	server: ^Web_Server,
+	handler: Web_Handler,
+	user: rawptr,
+) -> ^thread.Thread {
 	// Cross-thread state: the acceptor appends to `server.connections` while
 	// connection threads grow response builders from `server.allocator`, so
 	// it must be the thread-safe heap, not the test's rollback allocator.
 	ok, message := web_server_init(
 		server,
 		"127.0.0.1:0",
-		routes_handle,
-		routes,
+		handler,
+		user,
 		allocator = runtime.default_allocator(),
 	)
 	if !ok {
@@ -325,4 +336,61 @@ test_server_reaps_completed_connections :: proc(t: ^testing.T) {
 	thread.join(run_thread)
 	thread.destroy(run_thread)
 	web_server_destroy(&server)
+}
+
+@(private)
+Arena_Probe :: struct {
+	lock:     sync.Mutex,
+	requests: int,
+	arena:    [2]bool, // the handler's temp allocator was an arena
+	empty:    [2]bool, // and nothing was allocated in it yet
+}
+
+@(private)
+arena_probe_handler :: proc(user: rawptr, request: ^Http_Request, response: ^Http_Response) {
+	probe := (^Arena_Probe)(user)
+	is_arena := context.temp_allocator.procedure == virtual.arena_allocator_proc
+	empty := is_arena && (^virtual.Arena)(context.temp_allocator.data).total_used == 0
+	// Scratch the next request must not see.
+	_ = make([]u8, 1024, context.temp_allocator)
+	sync.mutex_lock(&probe.lock)
+	if probe.requests < len(probe.arena) {
+		probe.arena[probe.requests] = is_arena
+		probe.empty[probe.requests] = empty
+	}
+	probe.requests += 1
+	sync.mutex_unlock(&probe.lock)
+	response.status = 200
+	response.body = transmute([]u8)string("ok\n")
+}
+
+// Every request on a keep-alive connection is handled in its own fresh arena.
+@(test)
+test_server_request_gets_fresh_temp_arena :: proc(t: ^testing.T) {
+	probe: Arena_Probe
+	server: Web_Server
+	run_thread := start_server_with(t, &server, arena_probe_handler, &probe)
+	if run_thread == nil {
+		return
+	}
+
+	client := dial_server(t, &server)
+	for _ in 0 ..< 2 {
+		send_text(client, "GET /probe HTTP/1.1\r\nHost: a\r\n\r\n")
+		response := read_response(client)
+		testing.expectf(t, strings.contains(string(response), "ok\n"), "response: %q", string(response))
+		delete(response)
+	}
+
+	net.close(client)
+	web_server_stop(&server)
+	thread.join(run_thread)
+	thread.destroy(run_thread)
+	web_server_destroy(&server)
+
+	testing.expect_value(t, probe.requests, 2)
+	for i in 0 ..< 2 {
+		testing.expectf(t, probe.arena[i], "request %d: temp allocator is not an arena", i)
+		testing.expectf(t, probe.empty[i], "request %d: temp arena already held data", i)
+	}
 }
