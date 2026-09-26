@@ -577,6 +577,7 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				if time.tick_since(state.deadline) > 0 {
 					vm_fail(state, "E_DEADLINE", "wall-clock deadline exceeded")
 					if vm_unwind(state) {
+						program = state.program
 						continue
 					}
 					return .Failed
@@ -591,6 +592,7 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 			if state.instruction_budget_exhausted {
 				vm_fail(state, "E_BUDGET", "instruction budget exhausted")
 				if vm_unwind(state) {
+					program = state.program
 					continue
 				}
 				return .Failed
@@ -600,6 +602,7 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				state.instruction_budget_exhausted = true
 				vm_fail(state, "E_BUDGET", "instruction budget exhausted")
 				if vm_unwind(state) {
+					program = state.program
 					continue
 				}
 				return .Failed
@@ -1366,6 +1369,12 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 			if !vm_positional_dispatch(state, base, instr) {
 				break
 			}
+			program = state.program
+
+		case .Positional_Dispatch_Splice:
+			args, ok := vm_list_args(state, base, instr.c)
+			if !ok {break}
+			if !vm_positional_dispatch_args(state, base, instr, args) {break}
 			program = state.program
 		}
 
@@ -2184,6 +2193,23 @@ vm_call_function :: proc(
 
 @(private)
 vm_positional_dispatch :: proc(state: ^VM, base: int, instr: Instruction) -> bool {
+	argument_count := int(instr.flags)
+	args := make([]v.Value, argument_count, state.scratch_allocator)
+	for index in 0 ..< argument_count {
+		args[index] = state.registers[base + int(instr.c) + index]
+	}
+	return vm_positional_dispatch_args(state, base, instr, args)
+}
+
+// Ordinary and spliced calls share method selection, authority checks, and
+// binding. Only the argument list construction differs.
+@(private)
+vm_positional_dispatch_args :: proc(
+	state: ^VM,
+	base: int,
+	instr: Instruction,
+	args: []v.Value,
+) -> bool {
 	program := state.program
 	if state.source == nil {
 		vm_fail(state, "E_NO_SOURCE", "dispatch has no relation source")
@@ -2193,11 +2219,6 @@ vm_positional_dispatch :: proc(state: ^VM, base: int, instr: Instruction) -> boo
 	if _, is_symbol := v.value_as_symbol(selector); !is_symbol {
 		vm_fail(state, "E_TYPE", "receiver dispatch selector is not a symbol")
 		return false
-	}
-	argument_count := int(instr.flags)
-	args := make([]v.Value, argument_count, state.scratch_allocator)
-	for index in 0 ..< argument_count {
-		args[index] = state.registers[base + int(instr.c) + index]
 	}
 	relations := k.Dispatch_Relations {
 		method_selector = k.Relation_ID(program.dispatch_method_selector_relation),

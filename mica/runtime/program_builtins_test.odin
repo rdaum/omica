@@ -4,6 +4,7 @@ import k "../kernel"
 import v "../var"
 import vm "../vm"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:os"
 import "core:testing"
 import "core:time"
@@ -214,7 +215,7 @@ test_program_install_rules_and_recovery :: proc(t: ^testing.T) {
 					t,
 					world,
 					`install_source("make_relation(:Base, 1)\nmake_relation(:Derived, 1)\nDerived(x) :- Base(x)\nverb one()\n return 1\nend")
-install_source("verb two()\n return one() + 1\nend")`,
+install_source("verb two()\n return one(@[]) + 1\nend")`,
 				)
 				expect_relation_eval(
 					t,
@@ -240,6 +241,11 @@ require(two() == 2)`,
 
 @(test)
 test_program_cross_image_handlers_defaults_splice_and_spawn :: proc(t: ^testing.T) {
+	// Parent and spawned child can allocate concurrently.
+	arena: virtual.Arena
+	if !testing.expect(t, virtual.arena_init_growing(&arena) == nil) {return}
+	defer virtual.arena_destroy(&arena)
+	context.temp_allocator = virtual.arena_allocator(&arena)
 	defer free_all(context.temp_allocator)
 	kernel: k.Kernel
 	k.kernel_init(&kernel)
@@ -390,5 +396,110 @@ test_program_historical_decode_does_not_retain_replaced_image :: proc(t: ^testin
 		vm.program_release(historical)
 		_, leaked := world.programs.artifacts[first.value]
 		testing.expect(t, !leaked)
+	}
+}
+
+@(test)
+test_program_named_splice_dispatch :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	kernel: k.Kernel
+	k.kernel_init(&kernel)
+	defer k.kernel_destroy(&kernel)
+	world := relation_test_world(t, &kernel, "", "program_named_splice")
+	if world == nil {return}
+	defer world_destroy(world)
+	expect_relation_eval(
+		t,
+		world,
+		`install_source("verb sum3(x, y, ?z = 3)\n return x + y + z\nend")`,
+	)
+	expect_relation_eval(
+		t,
+		world,
+		`require(sum3(@[1, 2, 3]) == 6)
+require(sum3(1, @[2]) == 6)
+require(sum3(@[], 1, @[2, 4]) == 7)
+try
+ sum3(@[1])
+ raise E_NOT_REJECTED
+catch E_DISPATCH
+end
+try
+ missing_verb(@[])
+ raise E_NOT_REJECTED
+catch E_DISPATCH
+end
+try
+ sum3(@42)
+ raise E_NOT_REJECTED
+catch E_TYPE
+end`,
+	)
+	// Both the outer compiler and compile(source)'s artifact path must accept
+	// a named splice whose target was installed in another program.
+	compiled := expect_relation_eval(t, world, `return compile("return sum3(@[1, 2, 3])")`)
+	bytes, ok := v.value_as_bytes(compiled.value)
+	if !testing.expect(t, ok) {return}
+	decoded, err := vm.program_from_bytes(bytes, context.temp_allocator)
+	testing.expect_value(t, err, vm.Artifact_Error.None)
+	if decoded !=
+	   nil {testing.expect_value(t, vm.program_validate(decoded), vm.Program_Error.None)}
+}
+
+@(test)
+test_program_splice_dispatch_restrictions_and_authority :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	kernel: k.Kernel
+	k.kernel_init(&kernel)
+	defer k.kernel_destroy(&kernel)
+	world := relation_test_world(
+		t,
+		&kernel,
+		`verb kind(x @ #integer)
+ return :number
+end
+verb kind(x @ #string)
+ return :text
+end
+verb count(x, @rest)
+ return x + len(rest)
+end
+require(kind(@[1]) == :number)
+require(kind(@["hello"]) == :text)
+require(count(40, @[1, 2]) == 42)
+try
+ kind(@[true])
+ raise E_NOT_REJECTED
+catch E_DISPATCH
+end`,
+		"splice_restrictions",
+	)
+	if world == nil {return}
+	defer world_destroy(world)
+	for allowed in ([]bool{false, true}) {
+		tx := k.kernel_begin(&kernel)
+		program, message := runtime_compile(world, &tx, "return kind(@[1])", false)
+		k.transaction_destroy(&tx)
+		if !testing.expectf(t, program != nil, "compile: %s", message) {return}
+		task: Task
+		task_init(&task, 0, &kernel, program, &world.env, context.temp_allocator)
+		vm.program_release(program)
+		authority := k.authority_empty(context.temp_allocator)
+		authority.read_all = true
+		if allowed {authority.selectors[v.symbol_intern("kind")] = true}
+		task_set_authority(&task, authority)
+		result := task_run(&task)
+		if allowed {
+			testing.expect_value(t, result.kind, Task_Outcome_Kind.Complete)
+			testing.expect_value(t, result.value, v.value_symbol(v.symbol_intern("number")))
+		} else {
+			testing.expect_value(t, result.kind, Task_Outcome_Kind.Aborted)
+			error, ok := v.value_as_error(result.error)
+			if testing.expect(
+				t,
+				ok,
+			) {testing.expect_value(t, error.code, v.symbol_intern("E_PERMISSION"))}
+		}
+		task_destroy(&task)
 	}
 }

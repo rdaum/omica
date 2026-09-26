@@ -244,7 +244,7 @@ program_from_bytes :: proc(data: []u8, allocator: mem.Allocator) -> (^Program, A
 		if !op_ok || !flags_ok || !a_ok || !b_ok || !c_ok {
 			return nil, .Truncated
 		}
-		if int(op_byte) > int(Op.Call_Value_Splice) {
+		if int(op_byte) > int(Op.Positional_Dispatch_Splice) {
 			return nil, .Bad_Op
 		}
 		append(&builder.code, Instruction{op = Op(op_byte), flags = flags, a = a, b = b, c = c})

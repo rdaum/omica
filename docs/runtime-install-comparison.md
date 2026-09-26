@@ -60,11 +60,17 @@ Start with `mica/runtime/program_builtins.odin`, `mica/vm/registry.odin`, and th
 `mica/kernel/install_transaction.odin` implements the private staging view.
 The identity and program builtin tests cover rollback, authority, concurrent commits, old frames, escaped closures, rules, recovery, and legacy stores.
 
-The focused set of 13 tests passed under ThreadSanitizer with the repository's existing allocator suppression.
-The kernel, VM, and compiler suites passed, as did CLI/web integration and the affected compiler tools' build checks.
-The final full runtime run passed 188 tests.
-Full-suite and integration runs used the working tree, including separate pending retrieval/store repairs excluded from this PR.
-The before/after benchmark builds excluded those repairs.
+The review follow-up fixes named spliced calls across programs and cached-program restoration after deadline or instruction-budget exceptions.
+Spliced calls share ordinary positional dispatch's method selection, parameter restrictions, and authority checks.
+The new opcode is appended, so existing artifact opcode numbers remain unchanged.
+Tests cover artifact decoding and validation, stored-program recovery, optional/rest arguments, denial, and all three asynchronous-limit unwind paths.
+The splice and unwind regressions failed before the fixes.
+
+The isolated follow-up passed 189 runtime tests, 73 compiler tests, and 37 VM tests.
+The focused set of 15 runtime tests passed under ThreadSanitizer with the repository's existing allocator suppression.
+The isolated snapshot excludes separate pending retrieval/store repairs.
+Earlier kernel tests, CLI/web integration, and compiler-tool build checks also passed; those local runs used the working tree.
+The before/after benchmark builds excluded unrelated repairs and measure the original comparison draft, before this follow-up.
 Large-catalogue evaluation improved by about 70%; direct calls regressed by about 14%.
 The direct-call regression is unresolved in this draft.
 The full run also exposed a concurrent test sharing an unsafe temporary allocator; the concurrent constructor tests now use locked arenas.

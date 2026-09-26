@@ -2481,7 +2481,8 @@ emit_splice_call :: proc(
 			return -1, false
 		}
 	}
-	if function_index, found := emitter.functions[text]; found {
+	if function_index, found := emitter.functions[text];
+	   found && emitter.verb_declarations[text] <= 1 && !emitter.verb_restricted[text] {
 		destination := alloc_register(emitter)
 		vm.builder_emit(
 			emitter.builder,
@@ -2518,12 +2519,19 @@ emit_splice_call :: proc(
 		)
 		return destination, true
 	}
-	push_error(emitter, fmt.aprintf(
-		"unknown callable: %s",
-		text,
-		allocator = emitter.allocator,
-	))
-	return -1, false
+	// Like ordinary named calls, unresolved or restricted verbs dispatch
+	// against the live world. The VM receives the already-expanded list.
+	selector := emit_constant(emitter, v.value_symbol(v.symbol_intern(text)))
+	destination := alloc_register(emitter)
+	vm.builder_emit(
+		emitter.builder,
+		.Positional_Dispatch_Splice,
+		0,
+		i32(destination),
+		i32(selector),
+		i32(args_register),
+	)
+	return destination, true
 }
 
 // Lowers `receiver:selector(args)`. Positional arguments dispatch by method
