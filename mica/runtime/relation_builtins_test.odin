@@ -1,5 +1,6 @@
 package mica_runtime
 
+import "base:runtime"
 import "core:fmt"
 import "core:mem/virtual"
 import "core:os"
@@ -13,7 +14,7 @@ relation_test_world :: proc(t: ^testing.T, kernel: ^k.Kernel, source, suffix: st
 	path, ok := write_temp_source(t, fmt.aprintf("mica_relation_constructor_%s.mica", suffix, allocator = context.temp_allocator), source)
 	if !ok {return nil}
 	defer os.remove(path)
-	world, result := world_start(kernel, []string{path}, context.temp_allocator, World_Config{workers = workers})
+	world, result := world_start(kernel, []string{path}, runtime.heap_allocator(), World_Config{workers = workers})
 	if !testing.expectf(t, result.ok, "world start failed: %s", result.message) {return nil}
 	outcome := world_wait(world, world.entry)
 	if !testing.expectf(t, outcome.kind == .Complete, "entry failed: %s: %s", outcome.message, v.value_to_string(outcome.error, context.temp_allocator)) {
@@ -287,7 +288,7 @@ test_relation_constructor_store_recovery :: proc(t: ^testing.T) {
 		k.kernel_init(&kernel)
 		paths: []string
 		if boot == 0 {paths = []string{path}}
-		world, start := world_start(&kernel, paths, context.temp_allocator, World_Config{store_path = store_path})
+		world, start := world_start(&kernel, paths, runtime.heap_allocator(), World_Config{store_path = store_path})
 		if testing.expectf(t, start.ok, "boot %d: %s", boot, start.message) {
 			if boot == 0 {
 				entry := world_wait(world, world.entry)

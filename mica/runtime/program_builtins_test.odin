@@ -1,5 +1,6 @@
 package mica_runtime
 
+import "base:runtime"
 import k "../kernel"
 import v "../var"
 import vm "../vm"
@@ -205,7 +206,7 @@ test_program_install_rules_and_recovery :: proc(t: ^testing.T) {
 		world, started := world_start(
 			&kernel,
 			paths,
-			context.temp_allocator,
+			runtime.heap_allocator(),
 			World_Config{store_path = store_path},
 		)
 		if testing.expectf(t, started.ok, "boot: %s", started.message) {
@@ -306,7 +307,7 @@ test_program_legacy_store_reference_upgrade :: proc(t: ^testing.T) {
 		world, started := world_start(
 			&kernel,
 			paths,
-			context.temp_allocator,
+			runtime.heap_allocator(),
 			World_Config{store_path = store_path},
 		)
 		if testing.expectf(t, started.ok, "boot: %s", started.message) {

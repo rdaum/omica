@@ -10,6 +10,7 @@
 //   micabench [--samples N] [--budget-ms M] <file.mica>...
 package main
 
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -128,7 +129,7 @@ disassemble_file :: proc(path: string) -> bool {
 	world, start := r.world_start(
 		&kernel,
 		[]string{path},
-		context.temp_allocator,
+		runtime.heap_allocator(),
 		r.World_Config{workers = 1},
 	)
 	if !start.ok {

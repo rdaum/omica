@@ -1,5 +1,6 @@
 package mica_runtime
 
+import "base:runtime"
 import k "../kernel"
 import v "../var"
 import vm "../vm"
@@ -166,7 +167,7 @@ end`,
 		world, started := world_start(
 			&kernel,
 			paths,
-			context.temp_allocator,
+			runtime.heap_allocator(),
 			World_Config{workers = 4, store_path = store_path},
 		)
 		if testing.expectf(t, started.ok, "boot: %s", started.message) {
