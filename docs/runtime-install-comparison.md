@@ -76,3 +76,23 @@ The direct-call regression is unresolved in this draft.
 The full run also exposed a concurrent test sharing an unsafe temporary allocator; the concurrent constructor tests now use locked arenas.
 
 See [runtime measurements](runtime-benchmarks.md) for the baseline protocol and measurement status.
+
+## Integration with the September 27 fixes
+
+The rebased draft includes the concurrency, scratch-memory, and derived-block changes from the integration queue.
+Evaluation tasks use the world's allocator, while compilation keeps its private transaction view and program registry.
+Derived-block reuse applies only when the transaction has no staged rule additions.
+Publication preserves rule stratification checks and passes the base snapshot to derived-block maintenance.
+The book retains the constructor and installation contracts beside the synchronized language chapters.
+
+The combined draft passed `scripts/test.sh all` on Linux.
+This run included 195 runtime, 212 kernel, 73 compiler, and 37 VM tests, plus CLI and web integration checks.
+The 24 constructor, installation, and concurrent-host-call tests also passed under ThreadSanitizer with the repository suppression file.
+Leak reports remain outside the default test gate. These results do not establish leak-free execution.
+The earlier performance measurements remain historical. The rebase does not resolve the direct-call regression or callable retention.
+
+PR #117 still needs a host-only adaptation to this installation boundary.
+Its existing Add mode creates duplicate methods when source is filed again.
+This draft replaces a matching method signature and preserves its identity and grants.
+That difference needs a decision alongside helper replacement behavior before the host APIs can share one contract.
+Replace mode and persistent unit state remain separate work.
