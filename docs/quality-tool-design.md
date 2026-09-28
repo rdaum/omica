@@ -1,7 +1,8 @@
+<!-- The omica-specific design of the quality tool, as it stood before the draft was generalized for timbran-project/mica-spec. -->
+
 # draft-ndn-quality-tool-00: A Relational Code-Quality Tool for Omica
 
 **Status:** DRAFT
-**Corpus:** red (spec-first; the evidence is the acceptance criteria and no implementation exists yet)
 **Category:** Experimental
 **Authors:** Norman Nunley, Jr. <nnunley@gmail.com>
 

@@ -56,6 +56,46 @@ jobs:
           path: .cache/test-logs
           if-no-files-found: ignore
 
+  spec-conformance:
+    name: Mica spec evidence (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # timbran-project/mica-spec is private: checking it out needs a token
+    # with read access, stored as the MICA_SPEC_TOKEN secret.
+    env:
+      HAS_SPEC_TOKEN: ${{ secrets.MICA_SPEC_TOKEN != '' }}
+    steps:
+      - name: Spec token missing
+        if: env.HAS_SPEC_TOKEN != 'true'
+        run: echo "::notice::MICA_SPEC_TOKEN is not set; skipping the Mica spec evidence."
+
+      - uses: actions/checkout@v4
+        if: env.HAS_SPEC_TOKEN == 'true'
+        with:
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        if: env.HAS_SPEC_TOKEN == 'true'
+        with:
+          repository: timbran-project/mica-spec
+          token: ${{ secrets.MICA_SPEC_TOKEN }}
+          path: mica-spec
+
+      - name: Set up Odin
+        if: env.HAS_SPEC_TOKEN == 'true'
+        uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release: latest
+
+      - name: Install libcurl
+        if: env.HAS_SPEC_TOKEN == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libmbedtls-dev
+
+      - name: Run the spec evidence against omica
+        if: env.HAS_SPEC_TOKEN == 'true'
+        run: tools/spec-conformance/run.sh mica-spec
+
   sanitize:
     name: ThreadSanitizer (ubuntu)
     runs-on: ubuntu-latest

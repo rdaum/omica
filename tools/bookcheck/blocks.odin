@@ -25,6 +25,7 @@ Block :: struct {
 	has_expect:       bool,
 	expect_error:     string,
 	has_expect_error: bool,
+	has_expect_reject: bool, // refused before any task runs
 }
 
 // Returns the Mica blocks in `markdown`, with any `expect` or `expect-error`
@@ -70,6 +71,8 @@ extract_blocks :: proc(markdown: string, allocator: mem.Allocator) -> ([dynamic]
 		case owner >= 0 && type == "expect-error":
 			blocks[owner].expect_error = body
 			blocks[owner].has_expect_error = true
+		case owner >= 0 && type == "expect-reject":
+			blocks[owner].has_expect_reject = true
 		case:
 			owner = -1
 		}

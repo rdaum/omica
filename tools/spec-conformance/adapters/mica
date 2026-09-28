@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Adapter for tangled `mica` evidence (draft-ndn-mica-snippets-00): runs one
-# block, with its .attrs/.expect/.expect-error sidecars, through
-# `bookcheck --block`. Exit 0 pass or n/a, 1 fail, 2 could not run.
-# MICA_BOOKCHECK names a built bookcheck; otherwise one is built into a
-# temporary directory from this checkout.
+# Adapter for tangled `mica` evidence from timbran-project/mica-spec
+# (draft-ndn-mica-snippets-00): runs one block, with its .attrs, .expect and
+# .expect-error sidecars, through `bookcheck --block`. Exit 0 pass or n/a,
+# 1 fail, 2 could not run. MICA_BOOKCHECK names a built bookcheck;
+# otherwise one is built into a temporary directory from this checkout.
 set -u
 [ $# -eq 1 ] || { echo "usage: mica <tangled-block>" >&2; exit 2; }
 root="$(cd "$(dirname "$0")/../../.." && pwd)"

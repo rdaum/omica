@@ -208,6 +208,7 @@ run_one :: proc(path: string, profile: map[string]string, scratch_file: string) 
 	}
 	block.expect, block.has_expect = read_sidecar(path, ".expect")
 	block.expect_error, block.has_expect_error = read_sidecar(path, ".expect-error")
+	_, block.has_expect_reject = read_sidecar(path, ".expect-reject")
 	message, verdict := check_block(block, profile, scratch_file)
 	switch verdict {
 	case .Pass:
@@ -261,9 +262,15 @@ check_block :: proc(block: Block, profile: map[string]string, scratch_file: stri
 	}
 	_, errors := c.parse_program(block.source, context.temp_allocator)
 	if len(errors) > 0 {
+		if block.has_expect_reject {
+			return "", .Pass
+		}
 		return fmt.tprintf("parse: %s", errors[0].message), .Fail
 	}
 	if block.mode == .Parse {
+		if block.has_expect_reject {
+			return "expected the block to be refused, but it parsed", .Fail
+		}
 		return "", .Pass
 	}
 	if write_err := os.write_entire_file(scratch_file, transmute([]u8)block.source); write_err != nil {
@@ -275,7 +282,14 @@ check_block :: proc(block: Block, profile: map[string]string, scratch_file: stri
 	// World threads share this allocator, so it must be thread-safe.
 	world, start := r.world_start(&kernel, []string{scratch_file}, runtime.heap_allocator())
 	if !start.ok {
+		if block.has_expect_reject {
+			return "", .Pass
+		}
 		return fmt.tprintf("load: %s", start.message), .Fail
+	}
+	if block.has_expect_reject {
+		r.world_destroy(world)
+		return "expected the block to be refused before running, but it loaded", .Fail
 	}
 	defer r.world_destroy(world)
 	if world.entry == 0 {
