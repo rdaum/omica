@@ -184,8 +184,8 @@ let remaining = difference(Current(?person), Removed(?person))
 `project` keeps the named columns and removes duplicate rows. It accepts zero columns, producing the
 zero-column unit relation when the input is non-empty. `union` and `difference` require identical
 headings. `natural_join` matches every shared column name; with no shared columns it produces a
-Cartesian product. Join keys use canonical value identity, so an integer and float do not join
-merely because language numeric equality considers them equal.
+Cartesian product. Join keys use canonical value identity, the same identity `==` uses, so an
+integer and a float never join.
 
 ### Choosing the Answer's Heading
 

@@ -110,8 +110,9 @@ Mica representation of another value.
 
 ### Numeric Conversion
 
-Arithmetic does not mix integers and floats; use `to_float` or `to_int` at the point where a
-conversion is intended:
+Arithmetic does not mix integers and floats. Convert where the conversion is intended, with the
+cast operator `as` (see [Values](./values.md#explicit-conversion)) or its function spellings
+`to_float` and `to_int`:
 
 ```mica,eval
 require to_float(5) / to_float(2) == 2.5

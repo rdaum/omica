@@ -312,18 +312,39 @@ require minimum + maximum == -1
 require from_literal(to_literal(minimum)) == ok(minimum)
 ```
 
-### Numeric Conversion
+### Explicit Conversion
 
-`to_float(number)` returns a float. Integer conversion rounds to binary32. A float argument passes
-through unchanged. `to_int(number)` returns an integer only if the input is exactly integral and
-fits the integer range. Both functions raise `E_TYPE` for unsupported values. `to_int` also raises
-`E_TYPE` for fractional or out-of-range numbers.
+Mica never converts a value from one kind to another on its own. A program converts with the cast
+operator `expr as kind`, where `kind` is `int`, `float`, `string`, or `symbol`. `as` binds more
+tightly than binary operators and less tightly than unary operators, calls, indexing, and field
+access, so `a + b as float` converts only `b`.
 
-`parse_int(text)` accepts decimal digits with an optional leading minus. `parse_float(text)` accepts
-a decimal number with an optional sign, fraction, and exponent, then rounds it to binary32. Neither
-parser accepts surrounding whitespace, separators, or trailing text. Invalid spelling or overflow
-raises `E_INVARG`. A non-string argument raises `E_TYPE`. Float underflow can round to zero.
-Infinity and NaN remain invalid.
+| From     | `as int`                          | `as float`                      | `as string`         | `as symbol`               |
+| -------- | --------------------------------- | ------------------------------- | ------------------- | ------------------------- |
+| `int`    | itself                            | nearest binary32                | decimal digits      | `E_TYPE`                  |
+| `float`  | exact integral value, else `E_TYPE` | itself                        | the literal form    | `E_TYPE`                  |
+| `string` | parsed integer, else `E_INVARG`   | parsed float, else `E_INVARG`   | itself              | the symbol with that name |
+| `symbol` | `E_TYPE`                          | `E_TYPE`                        | its name, without `:` | itself                  |
+| `bool`   | `E_TYPE`                          | `E_TYPE`                        | `true` or `false`   | `E_TYPE`                  |
+
+Any other pair raises `E_TYPE`. Converting an integer to a float rounds to binary32 and can lose
+precision; converting a float to an integer never rounds.
+
+```mica,eval
+require 3 as float == 3.0
+require 42.0 as int == 42
+require "-42" as int == -42
+require "1.25e2" as float == 125.0
+require :ready as string == "ready"
+require "go" as symbol == :go
+require 16777217 as float == 16777216.0
+```
+
+The functions `to_int(number)`, `to_float(number)`, `parse_int(text)`, and `parse_float(text)` are
+the same conversions spelled as calls. `parse_int` accepts decimal digits with an optional leading
+minus; `parse_float` accepts a decimal number with an optional sign, fraction, and exponent, then
+rounds it to binary32. Neither accepts surrounding whitespace, separators, or trailing text. Float
+underflow can round to zero. Infinity and NaN remain invalid.
 
 ```mica,eval
 require parse_int("-42") == -42
@@ -332,40 +353,30 @@ require to_float(16777217) == 16777216.0
 require to_int(42.0) == 42
 ```
 
-### Numeric Equality And Key Identity
+### Equality And Ordering Are Kind-Strict
 
-Mica has two distinct comparison concepts:
-
-1. **Language numeric comparison** is used by `==`, `!=`, `<`, `<=`, `>`, `>=` in expressions and by
-   relation rule guards. When both operands are numeric, integers and floats compare by numeric
-   value rather than by value kind. Therefore `1 == 1.0` is true.
-
-2. **Canonical value order** is the total, type-sensitive order used by maps, relation tuples,
-   indexes, hashing, and persistence. An integer and a float remain distinct stored values even when
-   numerically equal, and may be distinct keys.
+`==` and `!=` compare values by canonical identity: values of different kinds are never equal. An
+integer and a float are different values even when they denote the same number, so `1 == 1.0` is
+false. `<`, `<=`, `>`, and `>=` compare two values of the same kind and raise `E_TYPE` for operands
+of different kinds. Relation rule guards follow the same rules. Cast one operand to compare across
+kinds.
 
 ```mica,eval
-require 1 == 1.0                         // numeric equality
+require 1 != 1.0
+require 1 as float == 1.0
+require [1] != [1.0]
 let labels = {1 -> "int", 1.0 -> "float"} // distinct map keys
 require labels[1] == "int"
 require labels[1.0] == "float"
-require [1] != [1.0]                     // structural equality
 return labels
 ```
 
-Numeric equality applies when the two operands themselves are numbers. It does not recursively
-coerce cells inside lists, maps, frobs, or relation values. This is why the list comparison above is
-false even though its individual numeric elements compare equal.
+The same canonical identity governs map keys, relation tuples, indexes, hashing, and persistence,
+so equality in expressions and identity in storage never disagree.
 
-Arithmetic does not mix integer and float operands. Both operands must have the same numeric kind; a
-mixed pair raises `E_TYPE`, and no implicit conversion is performed. Use `to_float` or `to_int` to
-convert an operand explicitly. Converting an integer to a float rounds to binary32 and can lose
-precision.
-
-Integer overflow and non-finite arithmetic results raise `E_ARITH`; division or remainder by zero
-raises `E_DIV`. Mixed _comparison_ does not round the integer to binary32 first: a large integer and
-a nearby rounded float can compare unequal. The arithmetic operators do not concatenate strings or
-collections.
+Arithmetic does not mix integer and float operands either: a mixed pair raises `E_TYPE`. Integer
+overflow and non-finite arithmetic results raise `E_ARITH`; division or remainder by zero raises
+`E_DIV`. The arithmetic operators do not concatenate strings or collections.
 
 ### Division Result Kinds
 
@@ -376,18 +387,42 @@ Division follows a result-kind rule:
 - `4.0 / 2.0` produces `Float(2.0)` because both operands are floats.
 - `4 / 2.0` raises `E_TYPE` because the operands mix kinds.
 
-The numeric values `4 / 2` and `4.0 / 2.0` are numerically equal (`2 == 2.0` is true), but the
-resulting values have different kinds and occupy different map or relation keys.
+The results of `4 / 2` and `4.0 / 2.0` denote the same number but have different kinds, so they are
+not equal and occupy different map or relation keys.
 
 Explicit conversion makes the intent clear when a float result is wanted:
 
 ```mica,eval
-require to_float(5) / to_float(2) == 2.5
-require to_int(4.0 / 2.0) == 2
+require 5 as float / 2 as float == 2.5
+require (4.0 / 2.0) as int == 2
 ```
 
 ### Structural Sorting
 
-Structural sorting uses canonical value order, so it can distinguish and order numeric values that
-language equality considers numerically equal. A sorted list may place `1` before `1.0` even though
-`1 == 1.0`.
+Structural sorting uses canonical value order, which orders values of different kinds by kind, so
+a sorted list can hold both `1` and `1.0`. Symbols sort by name, comparing Unicode scalar values;
+the order never depends on when a symbol was first used.
+
+### Literal Form
+
+`to_literal(value)` writes text that `from_literal` reads back to an equal value, and every
+implementation writes the same text for the same value:
+
+- An integer is its decimal digits, with a leading `-` when negative.
+- A float is the shortest decimal digit string that reads back to the same binary32 value. When the
+  value is zero or its magnitude is at least `1e-4` and below `1e7`, it is written positionally with
+  at least one digit after the point, such as `1.0`, `0.1`, or `100.0`. Otherwise it is written with
+  one digit before the point, at least one after, and an exponent: `1.0e20`, `1.5e-5`.
+- A string is double-quoted with the escapes above.
+- A symbol is `:name` when the name is a plain identifier, and otherwise `:` followed by the quoted
+  name, such as `:"with space"`.
+- Map entries, relation headings, and relation rows appear in canonical order.
+
+```mica,eval
+require to_literal(1.0) == "1.0"
+require to_literal(100.0) == "100.0"
+require to_literal(0.00001) == "1.0e-5"
+require to_literal(:"with space") == ":\"with space\""
+require to_literal({:zeta -> 1, :alpha -> 2}) == "{:alpha -> 2, :zeta -> 1}"
+require from_literal(to_literal(1.0)) == ok(1.0)
+```

@@ -37,7 +37,8 @@ Comparisons are ordinary binary operations, so express a bounded test as
 `low <= value && value <= high`, rather than chaining it as `low <= value <= high`.
 
 `&&` and `||` short-circuit. `!` and `not` are equivalent boolean negations. See
-[Values](./values.md) for truthiness, numeric comparison, and exact integer division.
+[Values](./values.md) for truthiness, kind-strict comparison, casts with `as`, and exact integer
+division.
 
 In `condition && action()`, the call runs only when `condition` is truthy; otherwise the result is
 `false`. In `condition || action()`, a truthy condition produces `true` without making the call.

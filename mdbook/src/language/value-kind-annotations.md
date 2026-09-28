@@ -40,8 +40,8 @@ The supported source names are:
 These names are contextual rather than reserved words. A local may still be named `int` or
 `relation` when the name is not in an annotation position.
 
-Each value-kind annotation is exact. `int` does not accept `float`, even when the values compare as
-numerically equal. Structural relation types and aliases refine the `relation` kind with headings,
+Each value-kind annotation is exact. `int` does not accept `float`, even when both denote the same
+number; convert with `as` first. Structural relation types and aliases refine the `relation` kind with headings,
 cell types, alternatives, and cardinality; see
 [Structural Relation Types](./structural-relation-types.md).
 

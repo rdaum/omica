@@ -1,13 +1,13 @@
 # Book examples omica does not pass yet, as path:line relative to mdbook/src.
 # tools/bookcheck fails when an example outside this list fails, and when a
 # listed example starts passing, so remove an entry in the change that fixes it.
-language/builtins.md:140
+language/builtins.md:141
 language/control-flow.md:116
 language/control-flow.md:230
 language/errors-and-recovery.md:30
 language/errors-and-recovery.md:94
 language/errors-and-recovery.md:141
-language/operators-and-calls.md:73
+language/operators-and-calls.md:74
 language/relations.md:196
 language/rules.md:69
 language/structural-relation-types.md:7
@@ -31,6 +31,10 @@ language/values.md:145
 language/values.md:167
 language/values.md:177
 language/values.md:308
+language/values.md:333
+language/values.md:364
+language/values.md:395
+language/values.md:421
 language/verbs-roles-dispatch.md:122
 language/verbs-roles-dispatch.md:177
 runtime/catalogue-and-introspection.md:78
