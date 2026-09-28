@@ -3201,6 +3201,8 @@ assemble_op :: proc(value: v.Value) -> (vm.Op, bool) {
 		return vm.Op.Builtin_Call_Splice, true
 	case "Call_Value_Splice":
 		return vm.Op.Call_Value_Splice, true
+	case "Positional_Dispatch_Splice":
+		return vm.Op.Positional_Dispatch_Splice, true
 	}
 	return vm.Op.Load_Const, false
 }

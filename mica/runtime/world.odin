@@ -114,6 +114,16 @@ World :: struct {
 	store:             ^s.Store,
 	entry:             Task_ID,
 	started:           bool,
+	// Set when the world booted from a non-empty store. The sources passed to
+	// `world_start` were then not loaded; the store's own units were.
+	booted:            bool,
+	// Set when methods name their own programs (the per-method layout). A
+	// store written by the single-program layout boots with this false.
+	per_method:        bool,
+	// Next relation, identity and rule numbers for `world_filein`.
+	declarations:      Declarations,
+	// Ordinal of the next UnitSource row, so boot recompiles in load order.
+	next_unit_ordinal: i64,
 	// External host bridge. Stream workers are tracked here so world shutdown
 	// can join them before the scheduler they deliver through is destroyed.
 	external_handler:  External_Handler,
@@ -187,6 +197,7 @@ world_start :: proc(
 
 	if world.store != nil &&
 	   (s.store_durable_version(world.store) > 0 || s.store_checkpoint_version(world.store) > 0) {
+		world.booted = true
 		result := world_boot(world, world.store, config)
 		if !result.ok {
 			world_destroy(world)
@@ -233,6 +244,8 @@ world_destroy :: proc(world: ^World) {
 	if world.program != nil {
 		vm.program_destroy(world.program, world.allocator)
 	}
+	program_registry_destroy(world.env.programs)
+	world.env.programs = nil
 	for source in world.sources {
 		delete(source, world.allocator)
 	}
@@ -398,7 +411,14 @@ world_eval_submit :: proc(
 	}
 	items: [dynamic]c.Item
 	defer delete(items)
-	for unit_source in world.sources {
+	// Per-method worlds reach verbs by dispatch, so only the eval source is
+	// compiled. Single-program worlds recompile the stored sources so method
+	// function indices match the eval program.
+	stored_sources := world.sources[:]
+	if world.per_method {
+		stored_sources = nil
+	}
+	for unit_source in stored_sources {
 		unit_ast, unit_errors := c.parse_program(unit_source, context.temp_allocator)
 		if len(unit_errors) > 0 {
 			return 0, Task_Outcome{kind = .Aborted, message = unit_errors[0].message}, false
@@ -422,6 +442,11 @@ world_eval_submit :: proc(
 	compiled := c.compile_program(&program_ast, &world.ctx, world.allocator)
 	if len(compiled.errors) > 0 {
 		return 0, Task_Outcome{kind = .Aborted, message = compiled.errors[0].message}, false
+	}
+	// Share the world's callables so function values cross between the eval
+	// and method programs.
+	if world.env.programs != nil {
+		vm.program_share_callables(compiled.program, world.env.programs.callables)
 	}
 	task := new(Task, world.allocator)
 	task_init(task, 0, world.kernel, compiled.program, &world.env, world.allocator)
@@ -562,42 +587,9 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 	defer delete(unit_entries)
 
 	for path in paths {
-		data, read_err := os.read_entire_file(path, allocator)
-		if read_err != nil {
-			return Run_Result {
-				ok = false,
-				message = fmt.aprintf("cannot read %s", path, allocator = allocator),
-			}
-		}
-		text := string(data)
-		expanded, expand_result := substitute_include_text(text, filepath.dir(path), allocator)
-		if !expand_result.ok {
-			return expand_result
-		}
-		if raw_data(expanded) != raw_data(text) {
-			delete(data, allocator)
-		}
-		granted, grant_result := expand_grant_blocks(expanded, allocator)
-		if !grant_result.ok {
-			return grant_result
-		}
-		if raw_data(granted) != raw_data(expanded) {
-			delete(expanded, allocator)
-		}
-		ast, parse_errors := c.parse_program(granted, allocator)
-		if len(parse_errors) > 0 {
-			first := parse_errors[0]
-			return Run_Result {
-				ok = false,
-				message = fmt.aprintf(
-					"%s:%d:%d: %s",
-					path,
-					first.line,
-					first.column,
-					first.message,
-					allocator = allocator,
-				),
-			}
+		granted, ast, read_result := read_filein_source(path, allocator)
+		if !read_result.ok {
+			return read_result
 		}
 		append(&asts, ast)
 		append(&world.sources, granted)
@@ -626,8 +618,10 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 		ctx          = &world.ctx,
 		fields       = make(map[string]Field_Info, allocator),
 		unit_sources = make(map[string]string, allocator),
+		programs     = program_registry_new(allocator),
 		allocator    = allocator,
 	}
+	world.per_method = true
 	unit_facts: [dynamic]Unit_Source_Fact
 	defer delete(unit_facts)
 	for entry in unit_entries {
@@ -715,37 +709,36 @@ world_load :: proc(world: ^World, paths: []string, config: World_Config) -> Run_
 		}
 	}
 
-	method_result := install_methods(&world.env, asts[:], world.sources[:], &declarations)
+	// Compile the entry first so a compile error is reported before any
+	// method is installed.
+	entry_program, entry_result := compile_entry_program(&world.ctx, asts[:], allocator)
+	if !entry_result.ok {
+		return entry_result
+	}
+	world.program = entry_program
+	vm.program_share_callables(world.program, world.env.programs.callables)
+
+	program_ids, program_result := install_verb_programs(&world.env, asts[:])
+	if !program_result.ok {
+		return program_result
+	}
+	defer delete(program_ids)
+	method_result := install_methods(
+		&world.env,
+		asts[:],
+		world.sources[:],
+		&declarations,
+		program_ids[:],
+	)
 	if !method_result.ok {
 		return method_result
 	}
-
-	items := make([dynamic]c.Item, allocator)
-	defer delete(items)
-	for ast in asts {
-		for item in ast.items {
-			append(&items, item)
-		}
+	world.declarations = Declarations {
+		next_relation = declarations.next_relation,
+		next_identity = declarations.next_identity,
+		next_rule     = declarations.next_rule,
 	}
-	program_ast := c.Program_AST {
-		items = items[:],
-	}
-
-	compiled := c.compile_program(&program_ast, &world.ctx, allocator)
-	if len(compiled.errors) > 0 {
-		if _, show_all := os.lookup_env("MICA_ALL_ERRORS", context.allocator); show_all {
-			for compile_error in compiled.errors {
-				fmt.eprintln(compile_error.message)
-			}
-		}
-		return Run_Result{ok = false, message = compiled.errors[0].message}
-	}
-	world.program = compiled.program
-
-	program_bytes_result := assert_program_bytes(&world.env, world.program)
-	if !program_bytes_result.ok {
-		return program_bytes_result
-	}
+	world.next_unit_ordinal = i64(len(unit_entries))
 
 	// The entry task runs root so declarations and grant facts can load.
 	workers := config.workers
@@ -811,6 +804,7 @@ world_boot :: proc(world: ^World, store: ^s.Store, config: World_Config) -> Run_
 		ctx          = &world.ctx,
 		fields       = make(map[string]Field_Info, allocator),
 		unit_sources = make(map[string]string, allocator),
+		programs     = program_registry_new(allocator),
 		allocator    = allocator,
 	}
 	subscriptions_init(&world.env.subscriptions, allocator)
@@ -890,6 +884,12 @@ world_boot :: proc(world: ^World, store: ^s.Store, config: World_Config) -> Run_
 	endpoint_identity, endpoint_ok := v.value_identity_raw(next_identity)
 	next_identity += 1
 	actor_identity, actor_ok := v.value_identity_raw(next_identity)
+	world.declarations = Declarations {
+		next_relation = max_user_relation_id(world.kernel) + 1,
+		next_identity = next_identity + 1,
+		next_rule     = max_stored_rule(world.kernel) + 1,
+	}
+	world.next_unit_ordinal = max_unit_ordinal(unit_rows[:]) + 1
 	if endpoint_ok && actor_ok {
 		world.env.endpoint = endpoint_identity
 		world.env.actor = actor_identity
@@ -913,9 +913,18 @@ world_boot :: proc(world: ^World, store: ^s.Store, config: World_Config) -> Run_
 
 	// Resolve the program from its artifact when present, so boot does not
 	// recompile sources; otherwise recompile as before.
-	program_result := world_boot_program(world, store)
-	if !program_result.ok {
-		return program_result
+	// Per-method stores decode every method program; single-program stores
+	// resolve their one artifact.
+	per_method, methods_result := load_method_programs(&world.env)
+	if !methods_result.ok {
+		return methods_result
+	}
+	world.per_method = per_method
+	if !per_method {
+		program_result := world_boot_program(world, store)
+		if !program_result.ok {
+			return program_result
+		}
 	}
 
 	rule_result := restore_rules(world)
@@ -1188,4 +1197,269 @@ allocator_is_thread_safe :: proc(allocator: mem.Allocator) -> bool {
 		return false
 	}
 	return true
+}
+
+// --- Programs and incremental filein ----------------------------------------
+
+// Compiles the top-level code of `asts` (everything but verbs, which compile
+// to their own programs) into one entry program.
+@(private)
+compile_entry_program :: proc(
+	ctx: ^c.Compile_Context,
+	asts: []^c.Program_AST,
+	allocator: mem.Allocator,
+) -> (
+	^vm.Program,
+	Run_Result,
+) {
+	items := make([dynamic]c.Item, context.temp_allocator)
+	for ast in asts {
+		for item in ast.items {
+			if _, is_verb := item.(c.Verb_Item); is_verb {
+				continue
+			}
+			append(&items, item)
+		}
+	}
+	program_ast := c.Program_AST {
+		items = items[:],
+	}
+	compiled := c.compile_program(&program_ast, ctx, allocator)
+	if len(compiled.errors) > 0 {
+		if _, show_all := os.lookup_env("MICA_ALL_ERRORS", context.allocator); show_all {
+			for compile_error in compiled.errors {
+				fmt.eprintln(compile_error.message)
+			}
+		}
+		return nil, Run_Result{ok = false, message = compiled.errors[0].message}
+	}
+	return compiled.program, Run_Result{ok = true, message = "loaded"}
+}
+
+// Reads one filein: expands includes and grant blocks, then parses. Returns
+// the expanded text, which is what the world records and recompiles.
+@(private)
+read_filein_source :: proc(
+	path: string,
+	allocator: mem.Allocator,
+) -> (
+	string,
+	^c.Program_AST,
+	Run_Result,
+) {
+	data, read_err := os.read_entire_file(path, allocator)
+	if read_err != nil {
+		return "", nil, Run_Result {
+			ok = false,
+			message = fmt.aprintf("cannot read %s", path, allocator = allocator),
+		}
+	}
+	text := string(data)
+	expanded, expand_result := substitute_include_text(text, filepath.dir(path), allocator)
+	if !expand_result.ok {
+		return "", nil, expand_result
+	}
+	if raw_data(expanded) != raw_data(text) {
+		delete(data, allocator)
+	}
+	granted, grant_result := expand_grant_blocks(expanded, allocator)
+	if !grant_result.ok {
+		return "", nil, grant_result
+	}
+	if raw_data(granted) != raw_data(expanded) {
+		delete(expanded, allocator)
+	}
+	ast, parse_errors := c.parse_program(granted, allocator)
+	if len(parse_errors) > 0 {
+		first := parse_errors[0]
+		return "", nil, Run_Result {
+			ok = false,
+			message = fmt.aprintf(
+				"%s:%d:%d: %s",
+				path,
+				first.line,
+				first.column,
+				first.message,
+				allocator = allocator,
+			),
+		}
+	}
+	return granted, ast, Run_Result{ok = true, message = "loaded"}
+}
+
+// How `world_filein` treats a unit that is already loaded. Matches Rust
+// mica's FileinMode.
+Filein_Mode :: enum {
+	// Run the source again, adding to what the unit already declared.
+	Add,
+	// Retract what the unit owns first, then run the source.
+	Replace,
+}
+
+// Files `paths` into a running world, as Rust mica's run_filein_with_unit
+// does: declarations, rules and verbs are installed (each verb as its own
+// program), the unit sources are recorded, and the files' top-level
+// expressions run as one root task, whose outcome is returned. Nothing
+// already loaded is recompiled.
+//
+// Requires the per-method layout; a store in the single-program layout is
+// refused until it is migrated.
+world_filein :: proc(
+	world: ^World,
+	paths: []string,
+	unit: string,
+	mode := Filein_Mode.Add,
+) -> Task_Outcome {
+	allocator := world.allocator
+	abort :: proc(message: string) -> Task_Outcome {
+		return Task_Outcome{kind = .Aborted, message = message}
+	}
+	if !world.per_method {
+		return abort("this store uses the single-program layout; filein into it is not supported")
+	}
+	if mode == .Replace {
+		return abort("replacing a unit is not implemented yet")
+	}
+
+	// Step 1: read and parse every file.
+	asts := make([dynamic]^c.Program_AST, context.temp_allocator)
+	sources := make([dynamic]string, context.temp_allocator)
+	units := make([dynamic]string, context.temp_allocator)
+	for path in paths {
+		source, ast, read_result := read_filein_source(path, allocator)
+		if !read_result.ok {
+			return abort(read_result.message)
+		}
+		unit_name := unit
+		if unit_name == "" {
+			unit_name = source_unit_name(path)
+		}
+		append(&asts, ast)
+		append(&sources, source)
+		append(&units, unit_name)
+	}
+
+	// Step 2: declarations, then the entry program, so a compile error stops
+	// the filein before rules or methods are installed.
+	declarations := &world.declarations
+	for ast in asts {
+		if result := prescan_file(&world.env, ast, declarations); !result.ok {
+			return abort(result.message)
+		}
+	}
+	identity_result := assert_named_identities(&world.env, declarations.named_identities[:])
+	delete(declarations.named_identities)
+	declarations.named_identities = nil
+	if !identity_result.ok {
+		return abort(identity_result.message)
+	}
+	entry, entry_result := compile_entry_program(&world.ctx, asts[:], allocator)
+	if !entry_result.ok {
+		return abort(entry_result.message)
+	}
+	vm.program_share_callables(entry, world.env.programs.callables)
+
+	// Step 3: rules, methods and unit sources.
+	for ast, index in asts {
+		result := install_rules(&world.env, world.kernel, ast, declarations, paths[index], sources[index])
+		if !result.ok {
+			vm.program_destroy(entry, allocator)
+			return abort(result.message)
+		}
+	}
+	program_ids, program_result := install_verb_programs(&world.env, asts[:])
+	if !program_result.ok {
+		vm.program_destroy(entry, allocator)
+		return abort(program_result.message)
+	}
+	defer delete(program_ids)
+	method_result := install_methods(&world.env, asts[:], sources[:], declarations, program_ids[:])
+	if !method_result.ok {
+		vm.program_destroy(entry, allocator)
+		return abort(method_result.message)
+	}
+	unit_facts := make([dynamic]Unit_Source_Fact, context.temp_allocator)
+	for source, index in sources {
+		unit_name := units[index]
+		append(
+			&unit_facts,
+			Unit_Source_Fact {
+				ordinal = world.next_unit_ordinal,
+				unit = v.symbol_intern(unit_name),
+				source = source,
+			},
+		)
+		world.next_unit_ordinal += 1
+		if existing, found := world.env.unit_sources[unit_name]; found {
+			combined := strings.concatenate([]string{existing, "\n\n", source}, allocator)
+			delete(existing, allocator)
+			world.env.unit_sources[unit_name] = combined
+		} else {
+			world.env.unit_sources[strings.clone(unit_name, allocator)] = strings.clone(source, allocator)
+		}
+		append(&world.sources, source)
+	}
+	if result := assert_unit_sources(&world.env, unit_facts[:]); !result.ok {
+		vm.program_destroy(entry, allocator)
+		return abort(result.message)
+	}
+
+	// Step 4: run the top-level expressions as root, as a first load does.
+	// The task owns the entry program and frees it on release.
+	task := new(Task, allocator)
+	enforce := world.env.enforce_authority
+	world.env.enforce_authority = false
+	task_init(task, 0, world.kernel, entry, &world.env, allocator)
+	world.env.enforce_authority = enforce
+	id := scheduler_submit_owned(&world.scheduler, task)
+	if id == 0 {
+		task_destroy(task)
+		free(task, allocator)
+		vm.program_destroy(entry, allocator)
+		return abort("cannot submit the filein task")
+	}
+	outcome := scheduler_wait(&world.scheduler, id)
+	scheduler_release(&world.scheduler, id)
+	return outcome
+}
+
+// Highest id of a relation declared by source. Catalogue, dispatch and other
+// built-in relations use the reserved range from 0x7000_0000.
+@(private)
+max_user_relation_id :: proc(kernel: ^k.Kernel) -> u32 {
+	maximum := u32(0)
+	snapshot := k.kernel_snapshot(kernel)
+	defer k.snapshot_release(snapshot)
+	for metadata in snapshot.catalog {
+		id := u32(metadata.id)
+		if id < 0x7000_0000 {
+			maximum = max(maximum, id)
+		}
+	}
+	return maximum
+}
+
+@(private)
+max_stored_rule :: proc(kernel: ^k.Kernel) -> u64 {
+	maximum := u64(0)
+	rows: [dynamic]v.Tuple
+	defer delete(rows)
+	k.kernel_scan_into(kernel, k.SYSTEM_RULE_ID, []v.Binding{{}}, &rows)
+	for row in rows {
+		if identity, is_identity := v.value_as_identity(v.tuple_values(row)[0]); is_identity {
+			maximum = max(maximum, v.identity_raw(identity))
+		}
+	}
+	return maximum
+}
+
+@(private)
+max_unit_ordinal :: proc(rows: []v.Tuple) -> i64 {
+	maximum := i64(-1)
+	for row in rows {
+		if ordinal, is_int := v.value_as_int(v.tuple_values(row)[0]); is_int {
+			maximum = max(maximum, ordinal)
+		}
+	}
+	return maximum
 }

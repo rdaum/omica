@@ -2518,12 +2518,19 @@ emit_splice_call :: proc(
 		)
 		return destination, true
 	}
-	push_error(emitter, fmt.aprintf(
-		"unknown callable: %s",
-		text,
-		allocator = emitter.allocator,
-	))
-	return -1, false
+	// Verbs resolve late: a spliced call to a name that is not a local or a
+	// builtin dispatches positionally, like an unspliced call.
+	selector := emit_constant(emitter, v.value_symbol(v.symbol_intern(text)))
+	destination := alloc_register(emitter)
+	vm.builder_emit(
+		emitter.builder,
+		.Positional_Dispatch_Splice,
+		0,
+		i32(destination),
+		i32(selector),
+		i32(args_register),
+	)
+	return destination, true
 }
 
 // Lowers `receiver:selector(args)`. Positional arguments dispatch by method

@@ -47,6 +47,8 @@ Builtin_Env :: struct {
 
 	// Source text per filein unit, keyed by unit name.
 	unit_sources:             map[string]string,
+	// The world's programs, one per verb, for dispatch. Nil for a bare task.
+	programs:                 ^Program_Registry,
 
 	// Runtime context identities returned by `endpoint()`, `actor()`, and
 	// `principal()`.
@@ -374,6 +376,20 @@ run_files :: proc(
 		return start_result
 	}
 	defer world_destroy(world)
+
+	// A store that already holds a world boots from it without loading the
+	// given files; file them into the booted world, as tools/filein does.
+	if world.booted {
+		if len(paths) == 0 {
+			return Run_Result{ok = true, message = "loaded"}
+		}
+		filed := world_filein(world, paths, options.unit)
+		scheduler_wait_quiescent(&world.scheduler)
+		if filed.kind != .Complete {
+			return Run_Result{ok = false, message = filed.message}
+		}
+		return Run_Result{ok = true, message = "loaded"}
+	}
 
 	outcome := world_wait(world, world.entry)
 	// Let any children the entry spawned finish before the world is torn

@@ -3791,7 +3791,7 @@ assert Marker(#alice, :seed)
 	testing.expect_value(t, entry.kind, Task_Outcome_Kind.Complete)
 	testing.expect(t, world_checkpoint(world))
 
-	// Exactly one ProgramBytes row, keyed by content identity.
+	// One ProgramBytes row per verb program, keyed by content identity.
 	rows: [dynamic]v.Tuple
 	defer delete(rows)
 	k.kernel_scan_into(&kernel, k.SYSTEM_PROGRAM_BYTES_ID, []v.Binding{{}, {}}, &rows)
@@ -3823,8 +3823,13 @@ assert Marker(#alice, :seed)
 		v.identity_raw(program_id),
 		vm.program_artifact_fingerprint(artifact) & v.IDENTITY_MAX,
 	)
-	testing.expect_value(t, len(program.functions), len(world.program.functions))
-	testing.expect_value(t, program.entry, world.program.entry)
+	// The row is the `mark` method's own program.
+	registered := program_registry_get(world.env.programs, values[0])
+	testing.expect(t, registered != nil)
+	if registered != nil {
+		testing.expect_value(t, len(program.functions), len(registered.functions))
+		testing.expect_value(t, program.entry, registered.entry)
+	}
 }
 
 @(test)

@@ -104,6 +104,10 @@ task_init :: proc(
 	task.state.user = env
 	if env != nil {
 		vm.vm_set_identities(&task.state, env.endpoint, env.actor, env.principal)
+		if env.programs != nil {
+			task.state.program_resolver = program_registry_resolve
+			task.state.program_resolver_user = env.programs
+		}
 	}
 	vm.vm_set_mailbox_validator(&task.state, mailbox_receivers_live, env)
 	register_runtime_builtins(&task.state)
