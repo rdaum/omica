@@ -240,3 +240,34 @@ Supplying a value in a role named `actor` or `agent` does not change the task's 
 authority. Roles select behaviour and pass arguments. Runtime authority still comes from the task
 context, and the selected method must be invokable under that authority. See
 [Authority and Capabilities](./authority.md).
+
+## Delegation Is Not Lookup
+
+`Delegates` decides which verb branches apply. It does not make one identity answer for another's
+facts. A query, a field read, or a dot read about an identity sees only the facts that mention that
+identity; nothing is looked up through its prototypes. A missing dot value still raises
+`E_CARDINALITY`, even when a prototype has one.
+
+When a world wants inheritance-like defaults, it writes them as a named rule. The rule says where a
+value comes from and when a local value overrides it, and the program can query, change, or replace
+that policy like any other rule:
+
+```mica,eval
+make_identity(:lamp_prototype)
+make_identity(:desk_lamp)
+make_functional_relation(:Lit, 2, [0])
+make_relation(:HasLocalLit, 1)
+make_relation(:EffectiveLit, 2)
+assert Delegates(#desk_lamp, #lamp_prototype, 0)
+assert Lit(#lamp_prototype, :on)
+EffectiveLit(thing, state) :- Lit(thing, state)
+EffectiveLit(thing, state) :-
+  Delegates(thing, prototype, _),
+  EffectiveLit(prototype, state),
+  not HasLocalLit(thing)
+require Lit(#desk_lamp, ?state) == [:state] {}
+require EffectiveLit(#desk_lamp, ?state) == [:state] { [:on] }
+```
+
+`Delegates` is one relation among many. A world may also define `PartOf`, `LocatedIn`, `RoleIn`, or
+several parallel taxonomies; the runtime treats none of them as the definition of what a thing is.

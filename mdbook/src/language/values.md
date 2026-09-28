@@ -249,6 +249,8 @@ AssignedTo(#inspection, #alice)
 
 An identity is also not the primary key of one privileged object table. It can appear in many
 relations, sometimes in key-like positions and sometimes as an ordinary referenced value.
+Mica's design notes call such a value a *handle*; see
+[Background and Sources](../background.md) for the idea and where it comes from.
 
 This is why identity and equality are separate concerns. Two values can be equal because they are
 the same integer or string. Two identities are equal when they are the same identity value. Whether
@@ -263,6 +265,30 @@ SamePerson(#alice_account, #alice_profile)
 ```
 
 Those are domain claims. They do not merge identity values at the runtime level.
+
+Equivalence is a relation, and a program chooses what kind. A claim can carry the purpose it holds
+for and the authority that made it, and rules can close it over chains of claims. Several
+equivalence relations can hold at once; none is privileged, and none changes `==` between the
+identities it relates.
+
+```mica,eval
+make_identity(:print_logo)
+make_identity(:web_logo)
+make_identity(:icon)
+make_relation(:EquivalentFor, 3)
+make_relation(:EquivalentUnder, 3)
+assert EquivalentFor(#print_logo, #web_logo, :rendering)
+assert EquivalentFor(#web_logo, #icon, :rendering)
+EquivalentUnder(a, b, purpose) :- EquivalentFor(a, b, purpose)
+EquivalentUnder(a, c, purpose) :- EquivalentFor(a, b, purpose), EquivalentUnder(b, c, purpose)
+require EquivalentUnder(#print_logo, #icon, :rendering)
+require !EquivalentUnder(#print_logo, #icon, :billing)
+require #print_logo != #icon
+```
+
+Because a claim is a fact, it can be queried, derived, authorized, and retracted like any other; a
+disputed claim is simply a fact some readers can see and others cannot, or one that a later
+transaction retracts.
 
 `to_literal` preserves identity values as identity source. It uses a named `#identity` when a
 source-compatible identity name is available and a numeric `#12345` form otherwise. A relation's
