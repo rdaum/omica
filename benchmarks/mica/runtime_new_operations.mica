@@ -1,0 +1,42 @@
+// Run once per fresh world. The companion driver fixes operation counts.
+verb identities()
+  let i = 0
+  while i < 100
+    let name = to_symbol(string_concat("new_identity_", to_literal(i)))
+    let id = make_identity(name)
+    require(NamedIdentity(id, name))
+    i = i + 1
+  end
+  return i
+end
+
+verb installation()
+  let i = 0
+  while i < 20
+    let name = string_concat("installed_", to_literal(i))
+    install_source(string_concat("verb ", name, "()\n return 42\nend"))
+    require(invoke(to_symbol(name), {}) == 42)
+    commit()
+    i = i + 1
+  end
+  return i
+end
+
+verb replacement()
+  let i = 0
+  while i < 20
+    install_source(string_concat("verb replaced()\n return ", to_literal(i), "\nend"))
+    require(replaced() == i)
+    commit()
+    i = i + 1
+  end
+  return i
+end
+
+verb cross_program()
+  let value = 0
+  while value < 2000
+    value = foreign(value)
+  end
+  return value
+end

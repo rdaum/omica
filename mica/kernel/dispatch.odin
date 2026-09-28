@@ -141,11 +141,7 @@ system_relation_metadata :: proc(allocator := context.allocator) -> []Relation_M
 		relation_metadata(SYSTEM_RELATION_ID, v.symbol_intern("Relation"), 1),
 		relation_metadata(SYSTEM_RELATION_NAME_ID, v.symbol_intern("RelationName"), 2),
 		relation_metadata(SYSTEM_ARITY_ID, v.symbol_intern("Arity"), 2),
-		relation_metadata(
-			SYSTEM_RELATION_DURABILITY_ID,
-			v.symbol_intern("RelationDurability"),
-			2,
-		),
+		relation_metadata(SYSTEM_RELATION_DURABILITY_ID, v.symbol_intern("RelationDurability"), 2),
 		relation_metadata(SYSTEM_RULE_ID, v.symbol_intern("Rule"), 1),
 		relation_metadata(SYSTEM_RULE_HEAD_ID, v.symbol_intern("RuleHead"), 2),
 		relation_metadata(SYSTEM_RULE_SOURCE_ID, v.symbol_intern("RuleSource"), 2),
@@ -169,7 +165,11 @@ system_relation_metadata :: proc(allocator := context.allocator) -> []Relation_M
 		relation_metadata(SYSTEM_METHOD_SOURCE_ID, v.symbol_intern("MethodSource"), 2),
 		relation_metadata(SYSTEM_SOURCE_OWNS_FACT_ID, v.symbol_intern("SourceOwnsFact"), 3),
 		relation_metadata(SYSTEM_SOURCE_OWNS_RULE_ID, v.symbol_intern("SourceOwnsRule"), 2),
-		relation_metadata(SYSTEM_SOURCE_OWNS_RELATION_ID, v.symbol_intern("SourceOwnsRelation"), 2),
+		relation_metadata(
+			SYSTEM_SOURCE_OWNS_RELATION_ID,
+			v.symbol_intern("SourceOwnsRelation"),
+			2,
+		),
 		metadata_with_durability(
 			relation_metadata(SYSTEM_ENDPOINT_ID, v.symbol_intern("Endpoint"), 1),
 			.Volatile,
@@ -197,6 +197,15 @@ system_relation_metadata :: proc(allocator := context.allocator) -> []Relation_M
 	}
 	metadata := make([]Relation_Metadata, len(entries), allocator)
 	copy(metadata, entries[:])
+	for &entry in metadata {
+		if entry.id == SYSTEM_NAMED_IDENTITY_ID {
+			keys := make([]u16, 1, allocator)
+			keys[0] = 1
+			entry.conflict = conflict_functional(keys)
+			entry.indexes = make([]Index_Spec, 1, allocator)
+			entry.indexes[0] = index_spec(keys)
+		}
+	}
 	return metadata
 }
 

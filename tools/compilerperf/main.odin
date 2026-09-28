@@ -12,13 +12,16 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:time"
-
 import k "../../mica/kernel"
 import r "../../mica/runtime"
 import v "../../mica/var"
 import vm "../../mica/vm"
 
-COMPILER :: []string{"apps/compiler/lex.mica", "apps/compiler/parse.mica", "apps/compiler/emit.mica"}
+COMPILER :: []string {
+	"apps/compiler/lex.mica",
+	"apps/compiler/parse.mica",
+	"apps/compiler/emit.mica",
+}
 
 TARGET :: `make_relation(:Point, 1)
 verb classify(n)
@@ -145,13 +148,15 @@ time_compile :: proc(replace: []u8, target: string, iterations: int, label: stri
 			fmt.eprintln("invalid program")
 			os.exit(1)
 		}
-		vm.program_destroy(world.program, world.allocator)
-		world.program = program
+		replaced := r.world_replace_program(world, program, context.allocator)
+		assert(replaced.ok, replaced.message)
 	}
-	roles := []k.Role_Pair{{
-		role  = v.value_symbol(v.symbol_intern("source")),
-		value = v.value_string(context.allocator, target),
-	}}
+	roles := []k.Role_Pair {
+		{
+			role = v.value_symbol(v.symbol_intern("source")),
+			value = v.value_string(context.allocator, target),
+		},
+	}
 	// Warm up.
 	for _ in 0 ..< 3 {
 		outcome := r.world_call(world, "emit_source", roles)
@@ -171,7 +176,7 @@ time_compile :: proc(replace: []u8, target: string, iterations: int, label: stri
 		}
 		best = min(best, elapsed)
 	}
-	fmt.printf("%-5s best %8.3f us/call\n", label, f64(best)/1000.0)
+	fmt.printf("%-5s best %8.3f us/call\n", label, f64(best) / 1000.0)
 	return best
 }
 
