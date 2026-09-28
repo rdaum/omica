@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Adapter for tangled `mica-session` evidence from timbran-project/mica-spec
+# (draft-ndn-mica-snippets-00, "Sessions"): runs the session's steps
+# against one omica world and store through `bookcheck --session`.
+# Exit 0 pass, 1 fail, 2 could not run. MICA_BOOKCHECK names a built
+# bookcheck; otherwise one is built into a temporary directory.
+set -u
+[ $# -eq 1 ] || { echo "usage: mica-session <tangled-session>" >&2; exit 2; }
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
+bin="${MICA_BOOKCHECK:-}"
+if [ -z "$bin" ]; then
+  bin="${TMPDIR:-/tmp}/omica-bookcheck-$(id -u)"
+  if [ ! -x "$bin" ] || [ -n "$(find "$root/tools/bookcheck" "$root/mica" -name '*.odin' -newer "$bin" -print -quit)" ]; then
+    odin build "$root/tools/bookcheck" -out:"$bin" >&2 || exit 2
+  fi
+fi
+"$bin" --session "$1"

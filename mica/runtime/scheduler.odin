@@ -1126,9 +1126,16 @@ scheduler_submit_dispatch :: proc(
 	if !found {
 		return Dispatch_Result{error = .No_Program}
 	}
+	// The method names its own program, or a function in `program` (the
+	// single-program layout).
+	start_program := program
 	function_index, is_int := v.value_as_int(program_value)
 	if !is_int {
-		return Dispatch_Result{error = .No_Program}
+		start_program = program_registry_get(env.programs if env != nil else nil, program_value)
+		if start_program == nil {
+			return Dispatch_Result{error = .No_Program}
+		}
+		function_index = i64(start_program.entry)
 	}
 	arguments, args_ok := k.dispatch_method_args(
 		method.params,
@@ -1140,7 +1147,7 @@ scheduler_submit_dispatch :: proc(
 	}
 
 	task := new(Task, scheduler.allocator)
-	task_init(task, 0, scheduler.kernel, program, env, scheduler.allocator)
+	task_init(task, 0, scheduler.kernel, start_program, env, scheduler.allocator)
 	for fact in facts {
 		if err := k.transaction_assert(&task.tx, fact.relation, fact.tuple); err != .None {
 			task_destroy(task)
@@ -1185,7 +1192,9 @@ scheduler_submit_dispatch :: proc(
 // The parent is resumed with the child's task id.
 @(private)
 scheduler_spawn_child :: proc(scheduler: ^Scheduler, parent: ^Task) -> Task_ID {
-	spec := parent.program.dispatch_specs[parent.state.request_spec]
+	// The spec belongs to the program of the frame that spawned, which is not
+	// the task's starting program once a dispatch entered another method.
+	spec := parent.state.program.dispatch_specs[parent.state.request_spec]
 	base := vm.vm_frame_base(&parent.state)
 
 	roles := make([]k.Role_Pair, len(spec.roles), scheduler.allocator)

@@ -555,11 +555,32 @@ run_integration() {
     problem "integration:filein-eval: expected a boolean, got '${out}'"
   fi
 
+  # A filein given to a store that already holds a world files into the booted
+  # world, as `mica filein` does in Rust: the new relation and verb are usable
+  # in the same process and after a restart.
+  printf 'make_relation(:Extra, 1)\nassert Extra(:filed)\nverb extra_count()\n  return 1\nend\n' > "${tmp}/extra.mica"
+  if capture "${tmp}/extra.log" "${test_timeout}" "${filein}" --store "${tmp}/db" \
+    "${tmp}/extra.mica" --eval 'return Extra(:filed)'; then
+    if grep -q "^true" "${tmp}/extra.log" && grep -q "^loaded" "${tmp}/extra.log"; then
+      pass "integration:filein-into-booted-store"
+    else
+      problem "integration:filein-into-booted-store: $(tr '\n' ' ' < "${tmp}/extra.log")"
+    fi
+  else
+    problem "integration:filein-into-booted-store: $(tr '\n' ' ' < "${tmp}/extra.log")"
+  fi
+  capture "${tmp}/extra-reboot.log" "${test_timeout}" "${filein}" --store "${tmp}/db" \
+    --eval 'return [Extra(:filed), extra_count()]' || true
+  if grep -q '^\[true, 1\]' "${tmp}/extra-reboot.log"; then
+    pass "integration:filein-into-booted-store-persists"
+  else
+    problem "integration:filein-into-booted-store-persists: $(tr '\n' ' ' < "${tmp}/extra-reboot.log")"
+  fi
+
   # A checkpoint after a store boot must complete (regression: reconstruction
   # advanced the version without writing the log, so the checkpoint waited for
   # records that never arrived).
-  if run_timeout 30 "${filein}" --store "${tmp}/db" \
-    --checkpoint apps/examples/equipment-service.mica >/dev/null 2>&1; then
+  if run_timeout 30 "${filein}" --store "${tmp}/db" --checkpoint >/dev/null 2>&1; then
     pass "integration:checkpoint-after-boot"
   else
     problem "integration:checkpoint-after-boot (timeout or error)"

@@ -135,6 +135,10 @@ Op :: enum u8 {
 	// Call_Value_Splice: a = dst, b = function value register, c = argument
 	// list register.
 	Call_Value_Splice,
+	// Positional_Dispatch_Splice: a = dst, b = selector register, c = argument
+	// list register. Dispatches like Positional_Dispatch with the list's items
+	// as the positional arguments.
+	Positional_Dispatch_Splice,
 }
 
 // A cell in a relation scan pattern.
@@ -228,17 +232,49 @@ Function :: struct {
 	defaults:       []i32,
 }
 
-// An interned callable: a program function plus the values captured when its
-// fn literal was evaluated. Callables live on the program so function values
-// remain valid across tasks that share the program.
+// An interned callable: a function of `program` plus the values captured when
+// its fn literal was evaluated. A function value is an index into a registry.
 Callable_Info :: struct {
+	program:  ^Program,
 	function: i32,
 	captures: []v.Value,
 }
 
+// Callables shared by every program that points at the registry. A world's
+// programs share one, so a function value made in one method can be called
+// from another. A program built on its own owns a private registry.
+Callable_Registry :: struct {
+	mutex:     sync.Mutex,
+	items:     [dynamic]Callable_Info,
+	allocator: mem.Allocator,
+}
+
+callable_registry_new :: proc(alloc: mem.Allocator) -> ^Callable_Registry {
+	registry := new(Callable_Registry, alloc)
+	registry.items = make([dynamic]Callable_Info, alloc)
+	registry.allocator = alloc
+	return registry
+}
+
+callable_registry_destroy :: proc(registry: ^Callable_Registry) {
+	if registry == nil {
+		return
+	}
+	alloc := registry.allocator
+	for callable in registry.items {
+		if callable.captures != nil {
+			free(raw_data(callable.captures), alloc)
+		}
+	}
+	delete(registry.items)
+	free(registry, alloc)
+}
+
 Program :: struct {
-	callables_mutex: sync.Mutex,
-	callables:       [dynamic]Callable_Info,
+	// Registry for function values made by this program. Shared across a
+	// world's programs; `owns_callables` says whether this program frees it.
+	callables:       ^Callable_Registry,
+	owns_callables:  bool,
 	code:      []Instruction,
 	constants: []v.Value,
 	functions: []Function,
@@ -521,7 +557,8 @@ builder_build :: proc(builder: ^Builder, alloc: mem.Allocator) -> ^Program {
 	}
 	program.builtins = make([]v.Symbol, len(builder.builtins), alloc)
 	copy(program.builtins, builder.builtins[:])
-	program.callables = make([dynamic]Callable_Info, alloc)
+	program.callables = callable_registry_new(alloc)
+	program.owns_callables = true
 	program.entry = builder.entry
 	program.dispatch_method_selector_relation = builder.dispatch_method_selector_relation
 	program.dispatch_param_relation = builder.dispatch_param_relation
@@ -530,15 +567,31 @@ builder_build :: proc(builder: ^Builder, alloc: mem.Allocator) -> ^Program {
 	return program
 }
 
-program_destroy :: proc(program: ^Program, alloc: mem.Allocator) {
-	for callable in program.callables {
-		if callable.captures != nil {
-			free(raw_data(callable.captures), alloc)
-		}
+// Points `program` at a shared registry, freeing its private one.
+program_share_callables :: proc(program: ^Program, registry: ^Callable_Registry) {
+	if program.owns_callables {
+		callable_registry_destroy(program.callables)
 	}
-	// `callables` is a dynamic array, so it frees through the allocator it was
-	// created with (`alloc` in `builder_build`).
-	delete(program.callables)
+	program.callables = registry
+	program.owns_callables = false
+}
+
+program_destroy :: proc(program: ^Program, alloc: mem.Allocator) {
+	if program.owns_callables {
+		callable_registry_destroy(program.callables)
+	} else if program.callables != nil {
+		// Function values made by this program outlive it in a shared
+		// registry; mark them dead so a later call fails instead of reading
+		// freed code.
+		registry := program.callables
+		sync.mutex_lock(&registry.mutex)
+		for &callable in registry.items {
+			if callable.program == program {
+				callable.program = nil
+			}
+		}
+		sync.mutex_unlock(&registry.mutex)
+	}
 	free(raw_data(program.code), alloc)
 	free(raw_data(program.constants), alloc)
 	for function in program.functions {
@@ -912,7 +965,7 @@ program_validate :: proc(program: ^Program) -> Program_Error {
 				if instr.b < 0 || int(instr.b) >= len(program.builtins) {
 					return .Bad_Function
 				}
-			case .Call_Value_Splice:
+			case .Call_Value_Splice, .Positional_Dispatch_Splice:
 				if !valid_register(instr.a, register_count) ||
 				   !valid_register(instr.b, register_count) ||
 				   !valid_register(instr.c, register_count) {
@@ -1062,7 +1115,7 @@ program_disassemble :: proc(program: ^Program, alloc := context.allocator) -> st
 				fmt.sbprintf(&builder, " r%d fn%d args@r%d", instr.a, instr.b, instr.c)
 			case .Builtin_Call_Splice:
 				fmt.sbprintf(&builder, " r%d builtin%d args@r%d", instr.a, instr.b, instr.c)
-			case .Call_Value_Splice:
+			case .Call_Value_Splice, .Positional_Dispatch_Splice:
 				fmt.sbprintf(&builder, " r%d r%d args@r%d", instr.a, instr.b, instr.c)
 			}
 			strings.write_byte(&builder, '\n')
@@ -1166,6 +1219,8 @@ op_name :: proc(op: Op) -> string {
 		return "builtin_call_splice"
 	case .Call_Value_Splice:
 		return "call_value_splice"
+	case .Positional_Dispatch_Splice:
+		return "positional_dispatch_splice"
 	}
 	return "?"
 }

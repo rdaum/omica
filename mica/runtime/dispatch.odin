@@ -64,6 +64,9 @@ install_methods :: proc(
 	asts: []^c.Program_AST,
 	sources: []string,
 	declarations: ^Declarations,
+	// Per-verb program ids, in declaration order. Nil records function
+	// indices into one shared program instead.
+	program_ids: []v.Value = nil,
 ) -> Run_Result {
 	tx := k.kernel_begin(env.kernel)
 	defer k.transaction_destroy(&tx)
@@ -103,6 +106,9 @@ install_methods :: proc(
 			}
 
 			program_value := value_int_must(i64(function_index))
+			if program_ids != nil {
+				program_value = program_ids[function_index - 1]
+			}
 			if err := k.transaction_assert(
 				&tx,
 				k.DISPATCH_METHOD_PROGRAM_ID,

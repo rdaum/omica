@@ -35,7 +35,8 @@ import r "../../mica/runtime"
 import v "../../mica/var"
 
 USAGE :: "usage: bookcheck [--known FILE] [--profile KEY=VALUE]... <book-src-dir>\n" +
-	"       bookcheck [--profile KEY=VALUE]... --block FILE\n"
+	"       bookcheck [--profile KEY=VALUE]... --block FILE\n" +
+	"       bookcheck --session FILE\n"
 
 Verdict :: enum {
 	Pass,
@@ -44,7 +45,7 @@ Verdict :: enum {
 }
 
 main :: proc() {
-	known_path, book, block_path := "", "", ""
+	known_path, book, block_path, session_path := "", "", "", ""
 	profile := make(map[string]string)
 	if env, found := os.lookup_env("RFC_PROFILE", context.allocator); found {
 		add_facts(&profile, env)
@@ -61,6 +62,9 @@ main :: proc() {
 		case args[i] == "--block" && i + 1 < len(args):
 			i += 1
 			block_path = args[i]
+		case args[i] == "--session" && i + 1 < len(args):
+			i += 1
+			session_path = args[i]
 		case book == "" && !strings.has_prefix(args[i], "--"):
 			book = args[i]
 		case:
@@ -81,6 +85,8 @@ main :: proc() {
 
 	status := 2
 	switch {
+	case session_path != "" && block_path == "" && book == "" && known_path == "":
+		status = run_session_file(session_path)
 	case block_path != "" && book == "" && known_path == "":
 		status = run_one(block_path, profile, scratch_file)
 	case block_path == "" && book != "":
