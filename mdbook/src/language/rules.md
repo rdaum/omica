@@ -180,6 +180,32 @@ require itself. A cycle such as `a -> b -> a` does supply a path back to its sta
 self-pairs can follow from actual cycles. Define a separate reflexive rule over an explicit domain
 relation if every known item should relate to itself even without an edge.
 
+## Evaluation Does Not Change Answers
+
+A derived relation is defined by its rules, not by how the runtime computes it. An engine may keep a
+derived relation materialized, maintain it as facts change, or compute only the rows a query asks
+for, remembering subgoals so recursion terminates. Whichever it does, a query gets the same least
+fixpoint, negation follows the same strata, and the answer reflects every write the reader can see.
+No relation declares how it is evaluated.
+
+This also means recursion is safe to write in any direction. A left-recursive rule over facts that
+form a cycle still terminates, whether the query binds the start, the end, or neither:
+
+```mica,eval
+make_relation(:Edge, 2)
+make_relation(:Path, 2)
+assert Edge(:a, :b)
+assert Edge(:b, :c)
+assert Edge(:c, :a)
+Path(x, z) :- Path(x, y), Edge(y, z)
+Path(x, y) :- Edge(x, y)
+require Path(:a, ?to) == [:to] {[:a], [:b], [:c]}
+require Path(?from, :c) == [:from] {[:a], [:b], [:c]}
+```
+
+A subscription to a derived relation receives its changes as they commit, however the relation is
+otherwise evaluated.
+
 ## Stored Facts and Derived Support
 
 Retracting a head fact removes a stored assertion of that fact. It does not suppress a conclusion
