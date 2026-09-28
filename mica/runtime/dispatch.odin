@@ -52,7 +52,7 @@ install_dispatch_relations :: proc(env: ^Builtin_Env) -> Run_Result {
 	if !fact_result.ok {
 		return fact_result
 	}
-	return Run_Result{ok = true, message = "loaded"}
+	return seed_error_hierarchy(env)
 }
 
 // Records every verb in `asts` as a method. Function indices follow the same

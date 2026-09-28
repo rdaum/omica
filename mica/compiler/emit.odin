@@ -3116,7 +3116,7 @@ emit_try :: proc(emitter: ^Emitter, try: Try) -> (int, bool) {
 			vm.builder_emit(
 				emitter.builder,
 				.Binary,
-				u8(vm.Bin_Op.Eq),
+				u8(vm.Bin_Op.Error_Is_A),
 				i32(test),
 				i32(actual),
 				i32(expected),

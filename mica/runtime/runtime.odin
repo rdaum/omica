@@ -1172,6 +1172,7 @@ read_only_system_relation :: proc(id: k.Relation_ID) -> bool {
 	     k.SYSTEM_SUBJECT_FACT_ID,
 	     k.SYSTEM_MENTIONED_FACT_ID,
 	     k.SYSTEM_EXTENSIONAL_MENTIONED_FACT_ID,
+	     k.SYSTEM_ERROR_IS_A_ID,
 	     k.SYSTEM_NAMED_IDENTITY_ID,
 	     k.SYSTEM_UNIT_SOURCE_ID:
 		return true

@@ -835,6 +835,9 @@ world_boot :: proc(world: ^World, store: ^s.Store, config: World_Config) -> Run_
 		}
 	}
 	k.snapshot_release(catalog)
+	if upgraded := upgrade_error_hierarchy(&world.env); !upgraded.ok {
+		return upgraded
+	}
 	computed_result := install_runtime_computed_relations(&world.env)
 	if !computed_result.ok {
 		return computed_result

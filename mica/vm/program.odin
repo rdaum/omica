@@ -199,6 +199,9 @@ Bin_Op :: enum u8 {
 	Le,
 	Gt,
 	Ge,
+	// Whether the left error code is the right one or descends from it
+	// through ErrorParent links; catch clauses match with it.
+	Error_Is_A,
 }
 
 Un_Op :: enum u8 {
@@ -608,7 +611,7 @@ program_validate :: proc(program: ^Program) -> Program_Error {
 				   !valid_register(instr.c, register_count) {
 					return .Bad_Register
 				}
-				if u8(instr.flags) > u8(Bin_Op.Ge) {
+				if u8(instr.flags) > u8(Bin_Op.Error_Is_A) {
 					return .Bad_Function
 				}
 			case .Unary:
@@ -1195,6 +1198,8 @@ bin_op_name :: proc(op: Bin_Op) -> string {
 		return "gt"
 	case .Ge:
 		return "ge"
+	case .Error_Is_A:
+		return "error_is_a"
 	}
 	return "?"
 }

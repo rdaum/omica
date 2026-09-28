@@ -170,6 +170,8 @@ system_relation_metadata :: proc(allocator := context.allocator) -> []Relation_M
 		relation_metadata(SYSTEM_SOURCE_OWNS_FACT_ID, v.symbol_intern("SourceOwnsFact"), 3),
 		relation_metadata(SYSTEM_SOURCE_OWNS_RULE_ID, v.symbol_intern("SourceOwnsRule"), 2),
 		relation_metadata(SYSTEM_SOURCE_OWNS_RELATION_ID, v.symbol_intern("SourceOwnsRelation"), 2),
+		relation_metadata(SYSTEM_ERROR_PARENT_ID, v.symbol_intern("ErrorParent"), 2),
+		relation_metadata(SYSTEM_ERROR_IS_A_ID, v.symbol_intern("ErrorIsA"), 2),
 		metadata_with_durability(
 			relation_metadata(SYSTEM_ENDPOINT_ID, v.symbol_intern("Endpoint"), 1),
 			.Volatile,

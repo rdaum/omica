@@ -2105,8 +2105,9 @@ verb emit_try(rows, node, state)
       state = after_expected
       let [test_reg, after_test] = alloc_register(state)
       state = after_test
-      let [_, after_eq] = emit_instruction(state, :Binary, 5, test_reg, actual, expected)
-      state = after_eq
+      // 11 is Error_Is_A: a clause catches its code and every descendant.
+      let [_, after_test] = emit_instruction(state, :Binary, 11, test_reg, actual, expected)
+      state = after_test
       test = test_reg
     else
       let [true_reg, after_true] = load_constant(state, true)

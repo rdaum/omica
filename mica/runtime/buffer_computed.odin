@@ -392,5 +392,8 @@ install_runtime_computed_relations :: proc(env: ^Builtin_Env) -> Run_Result {
 	if installed := install_neighbourhood_computed_relations(env); !installed.ok {
 		return installed
 	}
+	if installed := install_error_hierarchy_computed_relation(env); !installed.ok {
+		return installed
+	}
 	return install_retrieval_computed_relation(env)
 }

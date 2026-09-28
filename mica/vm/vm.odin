@@ -676,6 +676,8 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 					} else {
 						match = false
 					}
+				case .Error_Is_A:
+					match = false
 				case:
 					match = false
 				}
@@ -732,6 +734,8 @@ vm_run :: proc(state: ^VM) -> VM_Status {
 				case .Ne:
 					state.registers[base + int(instr.a)] = v.value_bool(l != r)
 					done = true
+				case .Error_Is_A:
+					match = false
 				case:
 					match = false
 				}
@@ -1975,6 +1979,19 @@ vm_apply_write :: proc(state: ^VM, base: int, instr: Instruction, assert_write: 
 		vm_fail(state, "E_PERMISSION", "relation write denied")
 		return false
 	}
+	if assert_write && relation_id == k.SYSTEM_ERROR_PARENT_ID {
+		values := v.tuple_values(tuple)
+		_, code_ok := v.value_as_error_code(values[0])
+		_, parent_ok := v.value_as_error_code(values[1])
+		if !code_ok || !parent_ok {
+			vm_fail(state, "E_TYPE", "ErrorParent relates error codes")
+			return false
+		}
+		if vm_error_is_a(state, values[1], values[0]) {
+			vm_fail(state, "E_INVARG", "error parent link would form a cycle")
+			return false
+		}
+	}
 	err: k.Kernel_Error
 	if assert_write {
 		err = k.transaction_assert(state.transaction, relation_id, tuple)
@@ -2322,6 +2339,9 @@ vm_binary :: proc(state: ^VM, base: int, instr: Instruction) -> bool {
 	case .Ge:
 		order := v.language_numeric_cmp(left, right)
 		result = v.value_bool(order == .Greater || order == .Equal)
+		ok = true
+	case .Error_Is_A:
+		result = v.value_bool(vm_error_is_a(state, left, right))
 		ok = true
 	}
 
@@ -2701,4 +2721,20 @@ vm_duration_millis :: proc(value: v.Value) -> (i64, bool) {
 		return 0, false
 	}
 	return i64(millis), true
+}
+
+// Whether `code` is `ancestor` or descends from it. Links are read in the
+// task's view with root authority: matching a catch clause reveals nothing
+// the task could not observe by catching, so it needs no read grant.
+@(private)
+vm_error_is_a :: proc(state: ^VM, code, ancestor: v.Value) -> bool {
+	if v.value_eq(code, ancestor) {
+		return true
+	}
+	if state.source == nil {
+		return false
+	}
+	root := state.source^
+	root.authority = nil
+	return k.error_is_a(&root, code, ancestor)
 }
