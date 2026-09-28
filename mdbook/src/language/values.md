@@ -249,6 +249,8 @@ AssignedTo(#inspection, #alice)
 
 An identity is also not the primary key of one privileged object table. It can appear in many
 relations, sometimes in key-like positions and sometimes as an ordinary referenced value.
+Mica's design notes call such a value a *handle*; see
+[Background and Sources](../background.md) for the idea and where it comes from.
 
 This is why identity and equality are separate concerns. Two values can be equal because they are
 the same integer or string. Two identities are equal when they are the same identity value. Whether

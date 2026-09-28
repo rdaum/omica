@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](./introduction.md)
+[Background and Sources](./background.md)
 
 # Tutorial: A Persistent Relational System
 
